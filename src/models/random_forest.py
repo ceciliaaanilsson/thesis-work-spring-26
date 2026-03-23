@@ -1,4 +1,4 @@
-"""TODO: Random Forest model implementation.
+"""TODO: Random Forest model file.
 
 - Define the Random Forest classifier wrapper or custom implementation
 - Specify hyperparameters to explore

@@ -4,9 +4,7 @@
 - Export model modules for easier imports
 """
 
-from . import gbdt
-from . import gaussian_naive_bayes
-from . import knn
-from . import neural_network
+from . import decision_tree
+from . import gradient_boosted_trees
+from . import naive_bayes
 from . import random_forest
-from . import svm
