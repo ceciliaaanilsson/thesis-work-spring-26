@@ -42,7 +42,7 @@ def main():
     print("\nOne row per anon_student_id with all absence points:")
     print(df_grouped.head(5))
 
-    output_parquet = Path("data/grouped_absence_points.parquet")
+    output_parquet = Path("data/grouped_total_absence.parquet")
 
 
     try:
