@@ -19,6 +19,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.metrics import davies_bouldin_score, silhouette_score
+from sklearn.preprocessing import StandardScaler
 
 from src.aggregation import aggregate_to_student_level
 from src.data_loader import load_raw_data
@@ -26,12 +27,18 @@ from src.processing import FEATURES, clean_data, scale_data
 
 logger = logging.getLogger(__name__)
 
-# Clustering hyperparameters (Version 3)
+# Clustering hyperparameters (Version 4 — profiling & analysis phase)
 KMEANS_CLUSTERS = 5
-DBSCAN_EPS = 0.3
+DBSCAN_EPS = 0.6
 DBSCAN_MIN_SAMPLES = 10
 NOISE_INFO_THRESHOLD = 0.2
 ELBOW_K_RANGE = range(2, 11)  # K = 2 .. 10
+
+PROFILE_FEATURES = [
+    "total_absence_percent",
+    "invalid_ratio",
+    "absent_subject_count",
+]
 
 
 def _repo_root() -> Path:
@@ -78,25 +85,44 @@ def _metrics_scaled(
     return sil, db
 
 
+def _log_kmeans_cluster_centers(
+    km: KMeans, scaler: StandardScaler, feature_names: list[str]
+) -> None:
+    centers_scaled = km.cluster_centers_
+    centers_orig = scaler.inverse_transform(centers_scaled)
+    logger.info("K-Means cluster centers (original feature scale — interpretable):")
+    for i, row in enumerate(centers_orig):
+        parts = ", ".join(f"{name}={val:.4f}" for name, val in zip(feature_names, row))
+        logger.info("  Cluster %d: %s", i, parts)
+    logger.info("K-Means cluster centers (standardized feature space):")
+    for i, row in enumerate(centers_scaled):
+        parts = ", ".join(f"{name}={val:.4f}" for name, val in zip(feature_names, row))
+        logger.info("  Cluster %d: %s", i, parts)
+
+
 def _save_scatter(
     plot_df: pd.DataFrame,
     hue_col: str,
     title: str,
     out_path: Path,
+    x: str,
+    y: str,
+    xlabel: str,
+    ylabel: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9, 6))
     sns.scatterplot(
         data=plot_df,
-        x="total_absence_percent",
-        y="invalid_ratio",
+        x=x,
+        y=y,
         hue=hue_col,
         palette="viridis",
         alpha=0.5,
         ax=ax,
     )
     ax.set_title(title)
-    ax.set_xlabel("Total absence %")
-    ax.set_ylabel("Invalid absence ratio")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
     logger.info("Saved plot to %s", out_path)
@@ -128,6 +154,20 @@ def _plot_elbow(X_scaled: pd.DataFrame, out_path: Path) -> None:
         plt.close(fig)
 
 
+def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path) -> None:
+    corr = df[cols].corr()
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(corr, annot=True, fmt=".3f", cmap="coolwarm", center=0, ax=ax, vmin=-1, vmax=1)
+    ax.set_title("Feature correlation (student-level)")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    logger.info("Saved correlation heatmap to %s", out_path)
+    if plt.get_backend().lower() != "agg":
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 def _write_metrics_file(
     path: Path,
     km_sil: float | None,
@@ -136,7 +176,7 @@ def _write_metrics_file(
     db_db: float | None,
 ) -> None:
     lines = [
-        "Model comparison (Version 3)",
+        "Model comparison (Version 4)",
         "============================",
         "",
         f"K-Means (k={KMEANS_CLUSTERS})",
@@ -161,12 +201,15 @@ def main() -> None:
 
     path_student_features = processed_dir / "student_features.parquet"
     path_student_clusters = processed_dir / "student_clusters_results.parquet"
-    plot_kmeans = plots_dir / "kmeans_clusters_v3.png"
-    plot_dbscan = plots_dir / "dbscan_clusters_v3.png"
+    plot_kmeans = plots_dir / "kmeans_clusters_v4.png"
+    plot_dbscan = plots_dir / "dbscan_clusters_v4.png"
     plot_elbow = plots_dir / "kmeans_elbow_tool.png"
-    path_metrics = metrics_dir / "model_comparison_v3.txt"
+    plot_corr = plots_dir / "feature_correlation_v4.png"
+    plot_subject_spread = plots_dir / "subject_spread_v4.png"
+    path_metrics = metrics_dir / "model_comparison_v4.txt"
+    path_profiles = metrics_dir / "cluster_profiles_v4.csv"
 
-    logger.info("--- Pipeline start (v3) ---")
+    logger.info("--- Pipeline start (v4 — profiling & analysis) ---")
     logger.info("Data file: %s", raw_path)
 
     # 1. Cleaning — lesson-level (see processing.clean_data).
@@ -187,13 +230,26 @@ def main() -> None:
         "Starting Feature Selection: Using %d variables for clustering.",
         len(FEATURES),
     )
-    X_scaled, _scaler = scale_data(student_df, FEATURES)
+    X_scaled, scaler = scale_data(student_df, FEATURES)
+
+    _plot_feature_correlation(student_df, PROFILE_FEATURES, plot_corr)
 
     _plot_elbow(X_scaled, plot_elbow)
 
     logger.info("--- K-Means (k=%s) ---", KMEANS_CLUSTERS)
     km = KMeans(n_clusters=KMEANS_CLUSTERS, random_state=42, n_init=10)
     labels_km = km.fit_predict(X_scaled)
+    _log_kmeans_cluster_centers(km, scaler, FEATURES)
+
+    # Optional: map K-Means cluster IDs (0..K-1) to descriptive labels after inspecting
+    # cluster_profiles_v4.csv and domain knowledge, e.g.:
+    #   CLUSTER_LABELS = {
+    #       0: "High risk — high % absence across many subjects",
+    #       1: "Chronic illness / valid-dominant profile",
+    #       ...
+    #   }
+    # Then: results_df["cluster_label"] = results_df["KMeans_Cluster"].map(CLUSTER_LABELS)
+
     km_sil, km_db = _metrics_scaled(X_scaled, labels_km, "K-Means", exclude_noise=False)
 
     logger.info("--- DBSCAN (eps=%s, min_samples=%s) ---", DBSCAN_EPS, DBSCAN_MIN_SAMPLES)
@@ -226,6 +282,14 @@ def main() -> None:
     results_df.to_parquet(path_student_clusters, index=False)
     logger.info("Saved clustering results to %s", path_student_clusters)
 
+    profiles = (
+        results_df.groupby("KMeans_Cluster", as_index=False)[PROFILE_FEATURES]
+        .mean()
+        .sort_values("KMeans_Cluster")
+    )
+    profiles.to_csv(path_profiles, index=False)
+    logger.info("Saved cluster mean profiles to %s", path_profiles)
+
     plot_df = results_df.copy()
     plot_df["kmeans_cluster"] = plot_df["KMeans_Cluster"]
     plot_df["dbscan_cluster"] = plot_df["DBSCAN_Cluster"]
@@ -233,14 +297,32 @@ def main() -> None:
     _save_scatter(
         plot_df,
         hue_col="kmeans_cluster",
-        title="Total absence % vs invalid absence ratio (K-Means, v3)",
+        title="Total absence % vs invalid absence ratio (K-Means, v4)",
         out_path=plot_kmeans,
+        x="total_absence_percent",
+        y="invalid_ratio",
+        xlabel="Total absence %",
+        ylabel="Invalid absence ratio",
     )
     _save_scatter(
         plot_df,
         hue_col="dbscan_cluster",
-        title="Total absence % vs invalid absence ratio (DBSCAN, v3)",
+        title="Total absence % vs invalid absence ratio (DBSCAN, v4)",
         out_path=plot_dbscan,
+        x="total_absence_percent",
+        y="invalid_ratio",
+        xlabel="Total absence %",
+        ylabel="Invalid absence ratio",
+    )
+    _save_scatter(
+        plot_df,
+        hue_col="kmeans_cluster",
+        title="Total absence % vs absent subject count (K-Means, v4)",
+        out_path=plot_subject_spread,
+        x="total_absence_percent",
+        y="absent_subject_count",
+        xlabel="Total absence %",
+        ylabel="Absent subject count",
     )
 
 
