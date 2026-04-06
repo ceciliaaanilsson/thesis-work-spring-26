@@ -1,11 +1,7 @@
-"""Orchestrate Parquet load, clean, aggregate, cluster, and plot.
+"""Orchestrate Parquet load, clean, aggregate, cluster, and plot (Version 5).
 
-Thesis-aligned Data Preprocessing (conceptual order):
-Cleaning -> Feature Selection -> Aggregation -> Encoding -> Normalization.
-
-Operational order in this pipeline: raw load -> Cleaning -> Aggregation (to obtain
-student-level features) -> Feature Selection (FEATURES) -> Encoding (skipped;
-numeric-only) -> Normalization (StandardScaler) -> clustering.
+Student-level clustering only (no school-level analysis). Metadata columns
+(anon_student_id, grade, gender) are retained for export but excluded from scaling.
 """
 
 from __future__ import annotations
@@ -18,7 +14,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.cluster import DBSCAN, KMeans
-from sklearn.metrics import davies_bouldin_score, silhouette_score
+from sklearn.metrics import davies_bouldin_score, silhouette_samples, silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 from src.aggregation import aggregate_to_student_level
@@ -27,18 +23,21 @@ from src.processing import FEATURES, clean_data, scale_data
 
 logger = logging.getLogger(__name__)
 
-# Clustering hyperparameters (Version 4 — profiling & analysis phase)
+# Version 5 — clustering hyperparameters
 KMEANS_CLUSTERS = 5
-DBSCAN_EPS = 0.6
+DBSCAN_EPS = 0.55
 DBSCAN_MIN_SAMPLES = 10
 NOISE_INFO_THRESHOLD = 0.2
-ELBOW_K_RANGE = range(2, 11)  # K = 2 .. 10
 
+# Training features only (metadata excluded from StandardScaler).
 PROFILE_FEATURES = [
     "total_absence_percent",
     "invalid_ratio",
     "absent_subject_count",
 ]
+METADATA_COLUMNS = ["anon_student_id", "grade", "gender"]
+
+PLOT_ALPHA = 0.6
 
 
 def _repo_root() -> Path:
@@ -117,7 +116,7 @@ def _save_scatter(
         y=y,
         hue=hue_col,
         palette="viridis",
-        alpha=0.5,
+        alpha=PLOT_ALPHA,
         ax=ax,
     )
     ax.set_title(title)
@@ -132,36 +131,54 @@ def _save_scatter(
         plt.close(fig)
 
 
-def _plot_elbow(X_scaled: pd.DataFrame, out_path: Path) -> None:
-    inertias: list[float] = []
-    k_list = list(ELBOW_K_RANGE)
-    for k in k_list:
-        km = KMeans(n_clusters=k, random_state=42, n_init=10)
-        km.fit(X_scaled)
-        inertias.append(float(km.inertia_))
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(k_list, inertias, marker="o")
-    ax.set_xlabel("K (number of clusters)")
-    ax.set_ylabel("Inertia (within-cluster sum of squares)")
-    ax.set_title("Elbow method: inertia vs K")
-    ax.set_xticks(k_list)
+def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path) -> None:
+    corr = df[cols].corr()
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(corr, annot=True, fmt=".3f", cmap="viridis", ax=ax, vmin=-1, vmax=1)
+    ax.set_title("Feature correlation (student-level, v5)")
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
-    logger.info("Saved elbow plot to %s", out_path)
+    logger.info("Saved correlation heatmap to %s", out_path)
     if plt.get_backend().lower() != "agg":
         plt.show()
     else:
         plt.close(fig)
 
 
-def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path) -> None:
-    corr = df[cols].corr()
-    fig, ax = plt.subplots(figsize=(6, 5))
-    sns.heatmap(corr, annot=True, fmt=".3f", cmap="coolwarm", center=0, ax=ax, vmin=-1, vmax=1)
-    ax.set_title("Feature correlation (student-level)")
+def _plot_kmeans_silhouette(X_scaled: pd.DataFrame, labels: np.ndarray, out_path: Path) -> None:
+    """Silhouette plot for K-Means (cluster stability visualization)."""
+    Xv = X_scaled.to_numpy()
+    sil_vals = silhouette_samples(Xv, labels)
+    n_clusters = len(np.unique(labels))
+    fig, ax = plt.subplots(figsize=(9, 6))
+    y_lower = 0
+    colors = sns.color_palette("viridis", n_clusters)
+    for i in range(n_clusters):
+        cluster_sil = sil_vals[labels == i]
+        cluster_sil.sort()
+        n_i = len(cluster_sil)
+        y_upper = y_lower + n_i
+        color = colors[i]
+        ax.fill_betweenx(
+            np.arange(y_lower, y_upper),
+            0,
+            cluster_sil,
+            facecolor=color,
+            edgecolor=color,
+            alpha=PLOT_ALPHA,
+        )
+        ax.text(-0.08, y_lower + 0.5 * n_i, str(i), va="center")
+        y_lower = y_upper + 10
+    mean_sil = float(silhouette_score(Xv, labels))
+    ax.axvline(x=mean_sil, color="crimson", linestyle="--", linewidth=1.5, label=f"Mean: {mean_sil:.3f}")
+    ax.set_xlabel("Silhouette coefficient")
+    ax.set_ylabel("Sample index (sorted by cluster)")
+    ax.set_title("K-Means silhouette analysis (v5)")
+    ax.set_xlim(-0.2, 1.0)
+    ax.legend(loc="upper right")
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
-    logger.info("Saved correlation heatmap to %s", out_path)
+    logger.info("Saved silhouette plot to %s", out_path)
     if plt.get_backend().lower() != "agg":
         plt.show()
     else:
@@ -176,7 +193,7 @@ def _write_metrics_file(
     db_db: float | None,
 ) -> None:
     lines = [
-        "Model comparison (Version 4)",
+        "Model comparison (Version 5)",
         "============================",
         "",
         f"K-Means (k={KMEANS_CLUSTERS})",
@@ -199,33 +216,36 @@ def main() -> None:
     raw_path = root / "data" / "raw" / "lyckeboskolan_absence_lasaret2425_v6.parquet"
     processed_dir, plots_dir, metrics_dir = _ensure_output_dirs(root)
 
-    path_student_features = processed_dir / "student_features.parquet"
-    path_student_clusters = processed_dir / "student_clusters_results.parquet"
-    plot_kmeans = plots_dir / "kmeans_clusters_v4.png"
-    plot_dbscan = plots_dir / "dbscan_clusters_v4.png"
-    plot_elbow = plots_dir / "kmeans_elbow_tool.png"
-    plot_corr = plots_dir / "feature_correlation_v4.png"
-    plot_subject_spread = plots_dir / "subject_spread_v4.png"
-    path_metrics = metrics_dir / "model_comparison_v4.txt"
-    path_profiles = metrics_dir / "cluster_profiles_v4.csv"
+    path_features_v5 = processed_dir / "student_features_v5.parquet"
+    path_clusters_v5 = processed_dir / "student_clusters_v5.parquet"
+    plot_corr = plots_dir / "feature_correlation_v5.png"
+    plot_sil = plots_dir / "kmeans_silhouette_v5.png"
+    plot_subject = plots_dir / "subject_spread_v5.png"
+    path_metrics = metrics_dir / "model_comparison_v5.txt"
+    path_profiles = metrics_dir / "cluster_profiles_v5.parquet"
 
-    logger.info("--- Pipeline start (v4 — profiling & analysis) ---")
+    logger.info("--- Pipeline start (v5) ---")
     logger.info("Data file: %s", raw_path)
 
-    # 1. Cleaning — lesson-level (see processing.clean_data).
     raw = load_raw_data(str(raw_path))
     cleaned = clean_data(raw)
 
-    # 2. Aggregation — student-level metrics (see aggregation.aggregate_to_student_level).
     student_df = aggregate_to_student_level(cleaned)
     student_df = student_df.reset_index(drop=True)
 
-    student_df.to_parquet(path_student_features, index=False)
-    logger.info("Saved student-level features to %s", path_student_features)
+    missing_meta = [c for c in METADATA_COLUMNS if c not in student_df.columns]
+    if missing_meta:
+        raise ValueError(f"Expected metadata columns missing after aggregation: {missing_meta}")
 
-    # Encoding (thesis): not applied here — clustering uses numeric aggregates only.
+    student_df.to_parquet(path_features_v5, index=False)
+    logger.info("Saved student-level features (v5) to %s", path_features_v5)
 
-    # 3. Feature selection + 4. Normalization — explicit list in processing.FEATURES; scaling in scale_data.
+    assert set(FEATURES) == set(PROFILE_FEATURES)
+    logger.info(
+        "Training features for scaling/clustering: %s (metadata excluded: %s)",
+        FEATURES,
+        [c for c in METADATA_COLUMNS if c not in FEATURES],
+    )
     logger.info(
         "Starting Feature Selection: Using %d variables for clustering.",
         len(FEATURES),
@@ -234,21 +254,12 @@ def main() -> None:
 
     _plot_feature_correlation(student_df, PROFILE_FEATURES, plot_corr)
 
-    _plot_elbow(X_scaled, plot_elbow)
-
     logger.info("--- K-Means (k=%s) ---", KMEANS_CLUSTERS)
     km = KMeans(n_clusters=KMEANS_CLUSTERS, random_state=42, n_init=10)
     labels_km = km.fit_predict(X_scaled)
     _log_kmeans_cluster_centers(km, scaler, FEATURES)
 
-    # Optional: map K-Means cluster IDs (0..K-1) to descriptive labels after inspecting
-    # cluster_profiles_v4.csv and domain knowledge, e.g.:
-    #   CLUSTER_LABELS = {
-    #       0: "High risk — high % absence across many subjects",
-    #       1: "Chronic illness / valid-dominant profile",
-    #       ...
-    #   }
-    # Then: results_df["cluster_label"] = results_df["KMeans_Cluster"].map(CLUSTER_LABELS)
+    _plot_kmeans_silhouette(X_scaled, labels_km, plot_sil)
 
     km_sil, km_db = _metrics_scaled(X_scaled, labels_km, "K-Means", exclude_noise=False)
 
@@ -279,46 +290,30 @@ def main() -> None:
     results_df = student_df.copy()
     results_df["KMeans_Cluster"] = labels_km
     results_df["DBSCAN_Cluster"] = labels_db
-    results_df.to_parquet(path_student_clusters, index=False)
-    logger.info("Saved clustering results to %s", path_student_clusters)
+    results_df.to_parquet(path_clusters_v5, index=False)
+    logger.info("Saved clustering results (v5) to %s", path_clusters_v5)
 
     profiles = (
-        results_df.groupby("KMeans_Cluster", as_index=False)[PROFILE_FEATURES]
-        .mean()
+        results_df.groupby("KMeans_Cluster", as_index=False)
+        .agg(
+            n_students=("anon_student_id", "count"),
+            total_absence_percent=("total_absence_percent", "mean"),
+            invalid_ratio=("invalid_ratio", "mean"),
+            absent_subject_count=("absent_subject_count", "mean"),
+        )
         .sort_values("KMeans_Cluster")
     )
-    profiles.to_csv(path_profiles, index=False)
-    logger.info("Saved cluster mean profiles to %s", path_profiles)
+    profiles.to_parquet(path_profiles, index=False)
+    logger.info("Saved cluster profiles (v5) to %s", path_profiles)
 
     plot_df = results_df.copy()
     plot_df["kmeans_cluster"] = plot_df["KMeans_Cluster"]
-    plot_df["dbscan_cluster"] = plot_df["DBSCAN_Cluster"]
 
     _save_scatter(
         plot_df,
         hue_col="kmeans_cluster",
-        title="Total absence % vs invalid absence ratio (K-Means, v4)",
-        out_path=plot_kmeans,
-        x="total_absence_percent",
-        y="invalid_ratio",
-        xlabel="Total absence %",
-        ylabel="Invalid absence ratio",
-    )
-    _save_scatter(
-        plot_df,
-        hue_col="dbscan_cluster",
-        title="Total absence % vs invalid absence ratio (DBSCAN, v4)",
-        out_path=plot_dbscan,
-        x="total_absence_percent",
-        y="invalid_ratio",
-        xlabel="Total absence %",
-        ylabel="Invalid absence ratio",
-    )
-    _save_scatter(
-        plot_df,
-        hue_col="kmeans_cluster",
-        title="Total absence % vs absent subject count (K-Means, v4)",
-        out_path=plot_subject_spread,
+        title="Total absence % vs absent subject count (K-Means, v5)",
+        out_path=plot_subject,
         x="total_absence_percent",
         y="absent_subject_count",
         xlabel="Total absence %",

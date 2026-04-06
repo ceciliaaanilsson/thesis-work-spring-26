@@ -8,7 +8,8 @@ from sklearn.preprocessing import StandardScaler
 logger = logging.getLogger(__name__)
 
 # Feature selection (thesis: Data Preprocessing — choose inputs for clustering).
-# These columns exist after student-level aggregation.
+# These columns exist after student-level aggregation. Metadata (anon_student_id,
+# grade, gender) is merged in aggregation but never passed to StandardScaler.
 FEATURES = [
     "total_absence_percent",
     "invalid_ratio",

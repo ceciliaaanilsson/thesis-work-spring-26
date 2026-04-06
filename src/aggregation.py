@@ -7,6 +7,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Minimum total scheduled minutes per student (reliability threshold for rate-based features).
+MIN_SCHEMA_MINUTES_TOTAL = 500
+
 
 def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregation (thesis: Data Preprocessing — student-level roll-up and derived metrics)."""
@@ -15,6 +18,13 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
         invalid_absence_minutes=("invalid_absence_minutes", "sum"),
         schema_minutes=("schema_minutes", "sum"),
     )
+
+    # Metadata for reporting (excluded from clustering in main).
+    meta = df.groupby("anon_student_id", as_index=False).agg(
+        grade=("grade", "first"),
+        gender=("gender", "first"),
+    )
+    agg = agg.merge(meta, on="anon_student_id", how="left")
 
     schema = agg["schema_minutes"].fillna(0)
     absence = agg["absence_minutes_total"].fillna(0)
@@ -47,6 +57,17 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     agg = agg.merge(absent_subjects, on="anon_student_id", how="left")
     agg["absent_subject_count"] = agg["absent_subject_count"].fillna(0).astype(np.int64)
     logger.info("Feature Engineering: Added 'absent_subject_count' to student profiles.")
+
+    n_before = len(agg)
+    agg = agg.loc[agg["schema_minutes"] >= MIN_SCHEMA_MINUTES_TOTAL].copy()
+    n_removed = n_before - len(agg)
+    logger.info(
+        "Reliability filter: removed %d students with total scheduled minutes (schema_minutes) < %d; "
+        "%d students retained.",
+        n_removed,
+        MIN_SCHEMA_MINUTES_TOTAL,
+        len(agg),
+    )
 
     logger.info("Aggregation: %d unique students (rows)", len(agg))
     return agg
