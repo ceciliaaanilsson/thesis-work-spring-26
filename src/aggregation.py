@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregation (thesis: Data Preprocessing — student-level roll-up and derived metrics)."""
     agg = df.groupby("anon_student_id", as_index=False).agg(
         absence_minutes_total=("absence_minutes_total", "sum"),
         invalid_absence_minutes=("invalid_absence_minutes", "sum"),
@@ -34,6 +35,18 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     invalid_ratio = np.zeros_like(total_m)
     np.divide(inv, total_m, out=invalid_ratio, where=total_m > 0)
     agg["invalid_ratio"] = invalid_ratio
+
+    # Feature engineering: count distinct subjects where the student had any absence.
+    absent_mask = df["absence_minutes_total"].fillna(0) > 0
+    absent_subjects = (
+        df.loc[absent_mask]
+        .groupby("anon_student_id", as_index=False)["subject"]
+        .nunique()
+        .rename(columns={"subject": "absent_subject_count"})
+    )
+    agg = agg.merge(absent_subjects, on="anon_student_id", how="left")
+    agg["absent_subject_count"] = agg["absent_subject_count"].fillna(0).astype(np.int64)
+    logger.info("Feature Engineering: Added 'absent_subject_count' to student profiles.")
 
     logger.info("Aggregation: %d unique students (rows)", len(agg))
     return agg

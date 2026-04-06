@@ -1,0 +1,11 @@
+Model comparison (Version 3)
+============================
+
+K-Means (k=5)
+  Silhouette score:        0.5238093925208936
+  Davies–Bouldin index:    0.8281512602316574
+
+DBSCAN (eps=0.3, min_samples=10)
+  Silhouette score:        0.21992801647111618
+  Davies–Bouldin index:    1.3492436826224825
+
