@@ -1,4 +1,4 @@
-"""Orchestrate Parquet load, clean, aggregate, cluster, and plot (Version 5).
+"""Orchestrate Parquet load, clean, aggregate, cluster, and plot (Version 6).
 
 Student-level clustering only (no school-level analysis). Metadata columns
 (anon_student_id, grade, gender) are retained for export but excluded from scaling.
@@ -23,7 +23,7 @@ from src.processing import FEATURES, clean_data, scale_data
 
 logger = logging.getLogger(__name__)
 
-# Version 5 — clustering hyperparameters
+# Version 6 — clustering hyperparameters
 KMEANS_CLUSTERS = 5
 DBSCAN_EPS = 0.55
 DBSCAN_MIN_SAMPLES = 10
@@ -135,7 +135,7 @@ def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path)
     corr = df[cols].corr()
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(corr, annot=True, fmt=".3f", cmap="viridis", ax=ax, vmin=-1, vmax=1)
-    ax.set_title("Feature correlation (student-level, v5)")
+    ax.set_title("Feature correlation (student-level, v6)")
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
     logger.info("Saved correlation heatmap to %s", out_path)
@@ -173,7 +173,7 @@ def _plot_kmeans_silhouette(X_scaled: pd.DataFrame, labels: np.ndarray, out_path
     ax.axvline(x=mean_sil, color="crimson", linestyle="--", linewidth=1.5, label=f"Mean: {mean_sil:.3f}")
     ax.set_xlabel("Silhouette coefficient")
     ax.set_ylabel("Sample index (sorted by cluster)")
-    ax.set_title("K-Means silhouette analysis (v5)")
+    ax.set_title("K-Means silhouette analysis (v6)")
     ax.set_xlim(-0.2, 1.0)
     ax.legend(loc="upper right")
     plt.tight_layout()
@@ -185,6 +185,78 @@ def _plot_kmeans_silhouette(X_scaled: pd.DataFrame, labels: np.ndarray, out_path
         plt.close(fig)
 
 
+def _write_raw_data_summary_v6(
+    path: Path,
+    student_df: pd.DataFrame,
+    labels_km: np.ndarray,
+    labels_db: np.ndarray,
+    km_sil: float | None,
+    km_db: float | None,
+    db_sil: float | None,
+    db_db: float | None,
+) -> None:
+    """Human-readable summary for manual verification (does not overwrite v5 outputs)."""
+    n = len(student_df)
+    lines: list[str] = []
+    lines.append("RAW DATA SUMMARY (Version 6)")
+    lines.append("=" * 64)
+    lines.append("")
+
+    lines.append("GLOBAL DATASET SUMMARY (entire filtered population)")
+    lines.append("-" * 64)
+    lines.append(f"  • N students:\t{n}")
+    lines.append("")
+    for feat in PROFILE_FEATURES:
+        s = student_df[feat]
+        lines.append(f"  • {feat}")
+        lines.append(f"\tmin:\t{s.min():.6f}")
+        lines.append(f"\tmax:\t{s.max():.6f}")
+        lines.append(f"\tmean:\t{s.mean():.6f}")
+        lines.append("")
+
+    lines.append("K-MEANS (k = {}) — per-cluster counts and feature means".format(KMEANS_CLUSTERS))
+    lines.append("-" * 64)
+    for c in sorted(np.unique(labels_km)):
+        mask = labels_km == c
+        cnt = int(mask.sum())
+        lines.append(f"  • Cluster {c}")
+        lines.append(f"\tn_students:\t{cnt}")
+        sub = student_df.loc[mask]
+        for feat in PROFILE_FEATURES:
+            lines.append(f"\tmean {feat}:\t{sub[feat].mean():.6f}")
+        lines.append("")
+
+    lines.append("DBSCAN — cluster structure and noise")
+    lines.append("-" * 64)
+    unique_labels, counts = np.unique(labels_db, return_counts=True)
+    non_noise_labels = [lab for lab in unique_labels if lab != -1]
+    n_clusters_found = len(non_noise_labels)
+    lines.append(f"  • Non-noise clusters found:\t{n_clusters_found}")
+    lines.append(f"  • Distinct labels (including noise):\t{len(unique_labels)}")
+    lines.append("")
+    for lab, cnt in zip(unique_labels, counts):
+        label_name = "noise" if lab == -1 else f"cluster {int(lab)}"
+        pct = 100.0 * float(cnt) / float(n)
+        lines.append(f"  • Label {lab} ({label_name})")
+        lines.append(f"\tn_students:\t{cnt}")
+        lines.append(f"\tpercentage:\t{pct:.2f}%")
+        lines.append("")
+    lines.append("MODEL SCORES (same metrics as model_comparison file)")
+    lines.append("-" * 64)
+    lines.append("  K-Means")
+    lines.append(f"\tSilhouette score:\t\t{km_sil if km_sil is not None else 'n/a (skipped)'}")
+    lines.append(f"\tDavies–Bouldin index:\t\t{km_db if km_db is not None else 'n/a (skipped)'}")
+    lines.append("")
+    lines.append("  DBSCAN")
+    lines.append(f"\tSilhouette score:\t\t{db_sil if db_sil is not None else 'n/a (skipped)'}")
+    lines.append(f"\tDavies–Bouldin index:\t\t{db_db if db_db is not None else 'n/a (skipped)'}")
+    lines.append("")
+    lines.append("(End of raw_data_summary_v6.txt)")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Wrote raw data summary (v6) to %s", path)
+
+
 def _write_metrics_file(
     path: Path,
     km_sil: float | None,
@@ -193,7 +265,7 @@ def _write_metrics_file(
     db_db: float | None,
 ) -> None:
     lines = [
-        "Model comparison (Version 5)",
+        "Model comparison (Version 6)",
         "============================",
         "",
         f"K-Means (k={KMEANS_CLUSTERS})",
@@ -216,15 +288,16 @@ def main() -> None:
     raw_path = root / "data" / "raw" / "lyckeboskolan_absence_lasaret2425_v6.parquet"
     processed_dir, plots_dir, metrics_dir = _ensure_output_dirs(root)
 
-    path_features_v5 = processed_dir / "student_features_v5.parquet"
-    path_clusters_v5 = processed_dir / "student_clusters_v5.parquet"
-    plot_corr = plots_dir / "feature_correlation_v5.png"
-    plot_sil = plots_dir / "kmeans_silhouette_v5.png"
-    plot_subject = plots_dir / "subject_spread_v5.png"
-    path_metrics = metrics_dir / "model_comparison_v5.txt"
-    path_profiles = metrics_dir / "cluster_profiles_v5.parquet"
+    path_features_v6 = processed_dir / "student_features_v6.parquet"
+    path_clusters_v6 = processed_dir / "student_clusters_v6.parquet"
+    plot_corr = plots_dir / "feature_correlation_v6.png"
+    plot_sil = plots_dir / "kmeans_silhouette_v6.png"
+    plot_subject = plots_dir / "subject_spread_v6.png"
+    path_metrics = metrics_dir / "model_comparison_v6.txt"
+    path_profiles = metrics_dir / "cluster_profiles_v6.parquet"
+    path_raw_summary = metrics_dir / "raw_data_summary_v6.txt"
 
-    logger.info("--- Pipeline start (v5) ---")
+    logger.info("--- Pipeline start (v6) ---")
     logger.info("Data file: %s", raw_path)
 
     raw = load_raw_data(str(raw_path))
@@ -237,8 +310,8 @@ def main() -> None:
     if missing_meta:
         raise ValueError(f"Expected metadata columns missing after aggregation: {missing_meta}")
 
-    student_df.to_parquet(path_features_v5, index=False)
-    logger.info("Saved student-level features (v5) to %s", path_features_v5)
+    student_df.to_parquet(path_features_v6, index=False)
+    logger.info("Saved student-level features (v6) to %s", path_features_v6)
 
     assert set(FEATURES) == set(PROFILE_FEATURES)
     logger.info(
@@ -287,11 +360,22 @@ def main() -> None:
 
     _write_metrics_file(path_metrics, km_sil, km_db, db_sil, db_db)
 
+    _write_raw_data_summary_v6(
+        path_raw_summary,
+        student_df,
+        labels_km,
+        labels_db,
+        km_sil,
+        km_db,
+        db_sil,
+        db_db,
+    )
+
     results_df = student_df.copy()
     results_df["KMeans_Cluster"] = labels_km
     results_df["DBSCAN_Cluster"] = labels_db
-    results_df.to_parquet(path_clusters_v5, index=False)
-    logger.info("Saved clustering results (v5) to %s", path_clusters_v5)
+    results_df.to_parquet(path_clusters_v6, index=False)
+    logger.info("Saved clustering results (v6) to %s", path_clusters_v6)
 
     profiles = (
         results_df.groupby("KMeans_Cluster", as_index=False)
@@ -304,7 +388,7 @@ def main() -> None:
         .sort_values("KMeans_Cluster")
     )
     profiles.to_parquet(path_profiles, index=False)
-    logger.info("Saved cluster profiles (v5) to %s", path_profiles)
+    logger.info("Saved cluster profiles (v6) to %s", path_profiles)
 
     plot_df = results_df.copy()
     plot_df["kmeans_cluster"] = plot_df["KMeans_Cluster"]
@@ -312,7 +396,7 @@ def main() -> None:
     _save_scatter(
         plot_df,
         hue_col="kmeans_cluster",
-        title="Total absence % vs absent subject count (K-Means, v5)",
+        title="Total absence % vs absent subject count (K-Means, v6)",
         out_path=plot_subject,
         x="total_absence_percent",
         y="absent_subject_count",
