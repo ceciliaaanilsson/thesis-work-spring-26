@@ -28,7 +28,6 @@ KMEANS_CLUSTERS = 5
 DBSCAN_EPS = 0.55
 DBSCAN_MIN_SAMPLES = 10
 NOISE_INFO_THRESHOLD = 0.2
-N_RUNS = 4
 
 # Training features only (metadata excluded from StandardScaler).
 PROFILE_FEATURES = [
@@ -140,6 +139,46 @@ def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
     logger.info("Saved correlation heatmap to %s", out_path)
+    if plt.get_backend().lower() != "agg":
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _plot_kmeans_silhouette(X_scaled: pd.DataFrame, labels: np.ndarray, out_path: Path) -> None:
+    """Silhouette plot for K-Means (cluster stability visualization)."""
+    Xv = X_scaled.to_numpy()
+    sil_vals = silhouette_samples(Xv, labels)
+    n_clusters = len(np.unique(labels))
+    fig, ax = plt.subplots(figsize=(9, 6))
+    y_lower = 0
+    colors = sns.color_palette("viridis", n_clusters)
+    for i in range(n_clusters):
+        cluster_sil = sil_vals[labels == i]
+        cluster_sil.sort()
+        n_i = len(cluster_sil)
+        y_upper = y_lower + n_i
+        color = colors[i]
+        ax.fill_betweenx(
+            np.arange(y_lower, y_upper),
+            0,
+            cluster_sil,
+            facecolor=color,
+            edgecolor=color,
+            alpha=PLOT_ALPHA,
+        )
+        ax.text(-0.08, y_lower + 0.5 * n_i, str(i), va="center")
+        y_lower = y_upper + 10
+    mean_sil = float(silhouette_score(Xv, labels))
+    ax.axvline(x=mean_sil, color="crimson", linestyle="--", linewidth=1.5, label=f"Mean: {mean_sil:.3f}")
+    ax.set_xlabel("Silhouette coefficient")
+    ax.set_ylabel("Sample index (sorted by cluster)")
+    ax.set_title("K-Means silhouette analysis (v6)")
+    ax.set_xlim(-0.2, 1.0)
+    ax.legend(loc="upper right")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    logger.info("Saved silhouette plot to %s", out_path)
     if plt.get_backend().lower() != "agg":
         plt.show()
     else:
@@ -288,117 +327,82 @@ def main() -> None:
 
     _plot_feature_correlation(student_df, PROFILE_FEATURES, plot_corr)
 
-    for run_idx in range(1, N_RUNS + 1):
-        logger.info("--- Run %d/%d ---", run_idx, N_RUNS)
+    logger.info("--- K-Means (k=%s) ---", KMEANS_CLUSTERS)
+    km = KMeans(n_clusters=KMEANS_CLUSTERS, random_state=42, n_init=10)
+    labels_km = km.fit_predict(X_scaled)
+    _log_kmeans_cluster_centers(km, scaler, FEATURES)
 
-        logger.info("--- K-Means (k=%s) ---", KMEANS_CLUSTERS)
-        km = KMeans(n_clusters=KMEANS_CLUSTERS, random_state=42, n_init=10)
-        labels_km = km.fit_predict(X_scaled)
-        _log_kmeans_cluster_centers(km, scaler, FEATURES)
+    _plot_kmeans_silhouette(X_scaled, labels_km, plot_sil)
 
-        km_sil, km_db = _metrics_scaled(
-            X_scaled,
-            labels_km,
-            f"K-Means (run {run_idx})",
-            exclude_noise=False,
-        )
+    km_sil, km_db = _metrics_scaled(X_scaled, labels_km, "K-Means", exclude_noise=False)
 
-        logger.info("--- DBSCAN (eps=%s, min_samples=%s) ---", DBSCAN_EPS, DBSCAN_MIN_SAMPLES)
-        dbs = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES)
-        labels_db = dbs.fit_predict(X_scaled)
-        n_noise = int((labels_db == -1).sum())
-        noise_share = n_noise / len(labels_db)
+    logger.info("--- DBSCAN (eps=%s, min_samples=%s) ---", DBSCAN_EPS, DBSCAN_MIN_SAMPLES)
+    dbs = DBSCAN(eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES)
+    labels_db = dbs.fit_predict(X_scaled)
+    n_noise = int((labels_db == -1).sum())
+    noise_share = n_noise / len(labels_db)
+    logger.info(
+        "DBSCAN: %d / %d points labeled noise (-1) (%.1f%%)",
+        n_noise,
+        len(labels_db),
+        100.0 * noise_share,
+    )
+    if noise_share >= NOISE_INFO_THRESHOLD:
         logger.info(
-            "DBSCAN: %d / %d points labeled noise (-1) (%.1f%%)",
-            n_noise,
-            len(labels_db),
-            100.0 * noise_share,
+            "DBSCAN: many points are noise — common for a first pass on scaled student-level data; "
+            "try tuning eps or min_samples if you want denser clusters."
         )
-        if noise_share >= NOISE_INFO_THRESHOLD:
-            logger.info(
-                "DBSCAN: many points are noise — common for a first pass on scaled student-level data; "
-                "try tuning eps or min_samples if you want denser clusters."
-            )
-        if len(np.unique(labels_db)) < 2 or (labels_db == -1).all():
-            logger.info("DBSCAN: skipped Silhouette / Davies–Bouldin (degenerate clustering)")
-            db_sil, db_db = None, None
-        else:
-            db_sil, db_db = _metrics_scaled(
-                X_scaled,
-                labels_db,
-                f"DBSCAN (run {run_idx})",
-                exclude_noise=True,
-            )
+    if len(np.unique(labels_db)) < 2 or (labels_db == -1).all():
+        logger.info("DBSCAN: skipped Silhouette / Davies–Bouldin (degenerate clustering)")
+        db_sil, db_db = None, None
+    else:
+        db_sil, db_db = _metrics_scaled(X_scaled, labels_db, "DBSCAN", exclude_noise=True)
 
-        run_metrics_path = metrics_dir / f"model_comparison_v6_run{run_idx}.txt"
-        _write_metrics_file(run_metrics_path, km_sil, km_db, db_sil, db_db)
-        if run_idx == N_RUNS:
-            _write_metrics_file(path_metrics, km_sil, km_db, db_sil, db_db)
+    _write_metrics_file(path_metrics, km_sil, km_db, db_sil, db_db)
 
-        _write_raw_data_summary_v6(
-            path_raw_summary,
-            student_df,
-            labels_km,
-            labels_db,
-            km_sil,
-            km_db,
-            db_sil,
-            db_db,
+    _write_raw_data_summary_v6(
+        path_raw_summary,
+        student_df,
+        labels_km,
+        labels_db,
+        km_sil,
+        km_db,
+        db_sil,
+        db_db,
+    )
+
+    results_df = student_df.copy()
+    results_df["KMeans_Cluster"] = labels_km
+    results_df["DBSCAN_Cluster"] = labels_db
+    results_df.to_parquet(path_clusters_v6, index=False)
+    logger.info("Saved clustering results (v6) to %s", path_clusters_v6)
+
+    profiles = (
+        results_df.groupby("KMeans_Cluster", as_index=False)
+        .agg(
+            n_students=("anon_student_id", "count"),
+            total_absence_percent=("total_absence_percent", "mean"),
+            invalid_ratio=("invalid_ratio", "mean"),
+            absent_subject_count=("absent_subject_count", "mean"),
         )
+        .sort_values("KMeans_Cluster")
+    )
+    profiles.to_parquet(path_profiles, index=False)
+    logger.info("Saved cluster profiles (v6) to %s", path_profiles)
 
-        results_df = student_df.copy()
-        results_df["KMeans_Cluster"] = labels_km
-        results_df["DBSCAN_Cluster"] = labels_db
+    plot_df = results_df.copy()
+    plot_df["kmeans_cluster"] = plot_df["KMeans_Cluster"]
 
-        run_clusters_path = processed_dir / f"student_clusters_v6_run{run_idx}.parquet"
-        results_df.to_parquet(run_clusters_path, index=False)
-        logger.info("Saved clustering results (run %d) to %s", run_idx, run_clusters_path)
-        if run_idx == N_RUNS:
-            results_df.to_parquet(path_clusters_v6, index=False)
-            logger.info("Saved clustering results (v6) to %s", path_clusters_v6)
-
-        profiles = (
-            results_df.groupby("KMeans_Cluster", as_index=False)
-            .agg(
-                n_students=("anon_student_id", "count"),
-                total_absence_percent=("total_absence_percent", "mean"),
-                invalid_ratio=("invalid_ratio", "mean"),
-                absent_subject_count=("absent_subject_count", "mean"),
-            )
-            .sort_values("KMeans_Cluster")
-        )
-        run_profiles_path = metrics_dir / f"cluster_profiles_v6_run{run_idx}.parquet"
-        profiles.to_parquet(run_profiles_path, index=False)
-        logger.info("Saved cluster profiles (run %d) to %s", run_idx, run_profiles_path)
-        if run_idx == N_RUNS:
-            profiles.to_parquet(path_profiles, index=False)
-            logger.info("Saved cluster profiles (v6) to %s", path_profiles)
-
-        plot_df = results_df.copy()
-        plot_df["kmeans_cluster"] = plot_df["KMeans_Cluster"]
-
-        run_plot_subject = plots_dir / f"subject_spread_v6_run{run_idx}.png"
-        _save_scatter(
-            plot_df,
-            hue_col="kmeans_cluster",
-            title=f"Total absence % vs absent subject count (K-Means, v6, run {run_idx})",
-            out_path=run_plot_subject,
-            x="total_absence_percent",
-            y="absent_subject_count",
-            xlabel="Total absence %",
-            ylabel="Absent subject count",
-        )
-        if run_idx == N_RUNS:
-            _save_scatter(
-                plot_df,
-                hue_col="kmeans_cluster",
-                title="Total absence % vs absent subject count (K-Means, v6)",
-                out_path=plot_subject,
-                x="total_absence_percent",
-                y="absent_subject_count",
-                xlabel="Total absence %",
-                ylabel="Absent subject count",
-            )
+    _save_scatter(
+        plot_df,
+        hue_col="kmeans_cluster",
+        title="Total absence % vs absent subject count (K-Means, v6)",
+        out_path=plot_subject,
+        x="total_absence_percent",
+        y="absent_subject_count",
+        xlabel="Total absence %",
+        ylabel="Absent subject count",
+    )
 
 
 if __name__ == "__main__":
