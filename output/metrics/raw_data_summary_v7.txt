@@ -1,6 +1,12 @@
 RAW DATA SUMMARY (Version 7)
 ================================================================
 
+EXPERIMENTAL SETTINGS
+----------------------------------------------------------------
+  • KMeans k:	5
+  • DBSCAN eps:	0.55
+  • DBSCAN min_samples:	10
+
 GLOBAL DATASET SUMMARY (entire filtered population)
 ----------------------------------------------------------------
   • N students:	1070
@@ -23,34 +29,34 @@ GLOBAL DATASET SUMMARY (entire filtered population)
 K-MEANS (k = 5) — per-cluster counts and feature means
 ----------------------------------------------------------------
   • Cluster 0
-	n_students:	506
-	mean total_absence_percent:	9.902636
-	mean invalid_ratio:	0.036143
-	mean absent_subject_count:	10.116601
+	n_students:	381
+	mean total_absence_percent:	17.303651
+	mean invalid_ratio:	0.071080
+	mean absent_subject_count:	12.212598
 
   • Cluster 1
-	n_students:	63
-	mean total_absence_percent:	22.802127
-	mean invalid_ratio:	0.541406
-	mean absent_subject_count:	10.571429
-
-  • Cluster 2
-	n_students:	410
-	mean total_absence_percent:	17.624699
-	mean invalid_ratio:	0.067806
-	mean absent_subject_count:	12.109756
-
-  • Cluster 3
 	n_students:	43
 	mean total_absence_percent:	10.972425
 	mean invalid_ratio:	0.060220
 	mean absent_subject_count:	4.627907
 
-  • Cluster 4
+  • Cluster 2
+	n_students:	535
+	mean total_absence_percent:	10.549850
+	mean invalid_ratio:	0.035528
+	mean absent_subject_count:	10.151402
+
+  • Cluster 3
 	n_students:	48
 	mean total_absence_percent:	73.808404
 	mean invalid_ratio:	0.309642
 	mean absent_subject_count:	10.812500
+
+  • Cluster 4
+	n_students:	63
+	mean total_absence_percent:	22.802127
+	mean invalid_ratio:	0.541406
+	mean absent_subject_count:	10.571429
 
 DBSCAN — cluster structure and noise
 ----------------------------------------------------------------
@@ -76,8 +82,8 @@ DBSCAN — cluster structure and noise
 MODEL SCORES (same metrics as model_comparison file)
 ----------------------------------------------------------------
   K-Means
-	Silhouette score:		0.2871115835854435
-	Davies–Bouldin index:		1.0848837751982987
+	Silhouette score:		0.2943103787948305
+	Davies–Bouldin index:		1.0883563481823368
 
   DBSCAN
 	Silhouette score:		0.396995230896243

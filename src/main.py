@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.cluster import DBSCAN, KMeans
-from sklearn.metrics import davies_bouldin_score, silhouette_samples, silhouette_score
+from sklearn.metrics import davies_bouldin_score, silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 from src.aggregation import aggregate_to_student_level
@@ -34,6 +34,7 @@ DBSCAN_CONFIG_OPTIONS = [
     ("medium", 0.55, 10),
     ("lenient", 0.8, 5),
 ]
+N_RUNS_PER_VALUE = 4
 
 # Training features only (metadata excluded from StandardScaler).
 PROFILE_FEATURES = [
@@ -151,6 +152,46 @@ def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path)
         plt.close(fig)
 
 
+def _plot_kmeans_cluster_counts(results_df: pd.DataFrame, out_path: Path) -> None:
+    counts = (
+        results_df["KMeans_Cluster"]
+        .value_counts()
+        .sort_index()
+        .rename_axis("KMeans_Cluster")
+        .reset_index(name="n_students")
+    )
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.barplot(data=counts, x="KMeans_Cluster", y="n_students", color="steelblue", ax=ax)
+    ax.set_title("Students per K-Means cluster (v7)")
+    ax.set_xlabel("KMeans cluster")
+    ax.set_ylabel("Number of students")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    logger.info("Saved K-Means counts plot to %s", out_path)
+    if plt.get_backend().lower() != "agg":
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _plot_kmeans_feature_boxplots(results_df: pd.DataFrame, out_path: Path) -> None:
+    features = ["total_absence_percent", "invalid_ratio", "absent_subject_count"]
+    fig, axes = plt.subplots(1, len(features), figsize=(18, 5), sharex=False)
+    for ax, feature in zip(axes, features):
+        sns.boxplot(data=results_df, x="KMeans_Cluster", y=feature, ax=ax)
+        ax.set_title(feature)
+        ax.set_xlabel("KMeans cluster")
+        ax.set_ylabel(feature)
+    fig.suptitle("Cluster feature distributions (v7)")
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    logger.info("Saved K-Means boxplots to %s", out_path)
+    if plt.get_backend().lower() != "agg":
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 def _write_raw_data_summary_v7(
     path: Path,
     student_df: pd.DataFrame,
@@ -160,12 +201,22 @@ def _write_raw_data_summary_v7(
     km_db: float | None,
     db_sil: float | None,
     db_db: float | None,
+    run_k: int,
+    run_eps: float,
+    run_min_samples: int,
 ) -> None:
     """Human-readable summary for manual verification (does not overwrite v5 outputs)."""
     n = len(student_df)
     lines: list[str] = []
     lines.append("RAW DATA SUMMARY (Version 7)")
     lines.append("=" * 64)
+    lines.append("")
+
+    lines.append("EXPERIMENTAL SETTINGS")
+    lines.append("-" * 64)
+    lines.append(f"  • KMeans k:\t{run_k}")
+    lines.append(f"  • DBSCAN eps:\t{run_eps}")
+    lines.append(f"  • DBSCAN min_samples:\t{run_min_samples}")
     lines.append("")
 
     lines.append("GLOBAL DATASET SUMMARY (entire filtered population)")
@@ -228,6 +279,11 @@ def _write_metrics_file(
     kmeans_rows: list[dict[str, float | int | None]],
     dbscan_rows: list[dict[str, float | int | str | None]],
 ) -> None:
+    def _fmt_num(value: float | None) -> str:
+        if value is None or pd.isna(value):
+            return "n/a"
+        return f"{float(value):.6f}"
+
     lines = [
         "Model comparison grid (Version 7)",
         "================================",
@@ -235,20 +291,72 @@ def _write_metrics_file(
         "K-Means",
         "-------",
     ]
-    lines.append("k\tSilhouette\tDavies-Bouldin")
+    lines.append("run\tk\tSilhouette\tDavies-Bouldin")
     for row in kmeans_rows:
-        lines.append(f"{row['k']}\t{row['silhouette']}\t{row['davies_bouldin']}")
+        lines.append(f"{row['run']}\t{row['k']}\t{row['silhouette']}\t{row['davies_bouldin']}")
 
     lines.extend([
         "",
         "DBSCAN",
         "------",
     ])
-    lines.append("profile\teps\tmin_samples\tSilhouette\tDavies-Bouldin")
+    lines.append("run\tprofile\teps\tmin_samples\tSilhouette\tDavies-Bouldin")
     for row in dbscan_rows:
         lines.append(
-            f"{row['profile']}\t{row['eps']}\t{row['min_samples']}\t{row['silhouette']}\t{row['davies_bouldin']}"
+            f"{row['run']}\t{row['profile']}\t{row['eps']}\t{row['min_samples']}\t{row['silhouette']}\t{row['davies_bouldin']}"
         )
+
+    if kmeans_rows:
+        km_df = pd.DataFrame(kmeans_rows)
+        km_df["silhouette"] = pd.to_numeric(km_df["silhouette"], errors="coerce")
+        km_df["davies_bouldin"] = pd.to_numeric(km_df["davies_bouldin"], errors="coerce")
+        km_summary = (
+            km_df.groupby("k", as_index=False)
+            .agg(
+                silhouette_mean=("silhouette", "mean"),
+                silhouette_std=("silhouette", "std"),
+                davies_mean=("davies_bouldin", "mean"),
+                davies_std=("davies_bouldin", "std"),
+            )
+            .sort_values("k")
+        )
+
+        lines.extend([
+            "",
+            "K-Means summary (mean/std across runs)",
+            "---------------------------------------",
+            "k\tSilhouette_mean\tSilhouette_std\tDavies_mean\tDavies_std",
+        ])
+        for _, row in km_summary.iterrows():
+            lines.append(
+                f"{int(row['k'])}\t{_fmt_num(row['silhouette_mean'])}\t{_fmt_num(row['silhouette_std'])}\t{_fmt_num(row['davies_mean'])}\t{_fmt_num(row['davies_std'])}"
+            )
+
+    if dbscan_rows:
+        db_df = pd.DataFrame(dbscan_rows)
+        db_df["silhouette"] = pd.to_numeric(db_df["silhouette"], errors="coerce")
+        db_df["davies_bouldin"] = pd.to_numeric(db_df["davies_bouldin"], errors="coerce")
+        db_summary = (
+            db_df.groupby(["profile", "eps", "min_samples"], as_index=False)
+            .agg(
+                silhouette_mean=("silhouette", "mean"),
+                silhouette_std=("silhouette", "std"),
+                davies_mean=("davies_bouldin", "mean"),
+                davies_std=("davies_bouldin", "std"),
+            )
+            .sort_values(["eps", "min_samples"])
+        )
+
+        lines.extend([
+            "",
+            "DBSCAN summary (mean/std across runs)",
+            "--------------------------------------",
+            "profile\teps\tmin_samples\tSilhouette_mean\tSilhouette_std\tDavies_mean\tDavies_std",
+        ])
+        for _, row in db_summary.iterrows():
+            lines.append(
+                f"{row['profile']}\t{row['eps']}\t{int(row['min_samples'])}\t{_fmt_num(row['silhouette_mean'])}\t{_fmt_num(row['silhouette_std'])}\t{_fmt_num(row['davies_mean'])}\t{_fmt_num(row['davies_std'])}"
+            )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info("Wrote metrics to %s", path)
@@ -263,9 +371,9 @@ def main() -> None:
 
     path_features_v7 = processed_dir / "student_features_v7.parquet"
     path_clusters_v7 = processed_dir / "student_clusters_v7.parquet"
-    plot_corr = plots_dir / "feature_correlation_v7.png"
-    plot_sil = plots_dir / "kmeans_silhouette_v7.png"
     plot_subject = plots_dir / "subject_spread_v7.png"
+    plot_kmeans_ratio = plots_dir / "kmeans_absence_ratio_v7.png"
+    plot_dbscan = plots_dir / "dbscan_spread_v7.png"
     path_metrics = metrics_dir / "model_comparison_v7.txt"
     path_profiles = metrics_dir / "cluster_profiles_v7.parquet"
     path_raw_summary = metrics_dir / "raw_data_summary_v7.txt"
@@ -298,8 +406,6 @@ def main() -> None:
     )
     X_scaled, scaler = scale_data(student_df, FEATURES)
 
-    _plot_feature_correlation(student_df, PROFILE_FEATURES, plot_corr)
-
     kmeans_rows: list[dict[str, float | int | None]] = []
     dbscan_rows: list[dict[str, float | int | str | None]] = []
     labels_km_for_summary: np.ndarray | None = None
@@ -310,141 +416,178 @@ def main() -> None:
     db_db_for_summary: float | None = None
 
     for k in KMEANS_CLUSTER_OPTIONS:
-        logger.info("--- K-Means (k=%s) ---", k)
-        km = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels_km = km.fit_predict(X_scaled)
-        _log_kmeans_cluster_centers(km, scaler, FEATURES)
+        for run_idx in range(1, N_RUNS_PER_VALUE + 1):
+            logger.info("--- K-Means (k=%s, run=%s/%s) ---", k, run_idx, N_RUNS_PER_VALUE)
+            km = KMeans(n_clusters=k, random_state=41 + run_idx, n_init=10)
+            labels_km = km.fit_predict(X_scaled)
+            _log_kmeans_cluster_centers(km, scaler, FEATURES)
 
-        km_sil, km_db = _metrics_scaled(
-            X_scaled,
-            labels_km,
-            f"K-Means (k={k})",
-            exclude_noise=False,
-        )
-        kmeans_rows.append(
-            {
-                "k": k,
-                "silhouette": km_sil,
-                "davies_bouldin": km_db,
-            }
-        )
-
-        results_df_km = student_df.copy()
-        results_df_km["KMeans_Cluster"] = labels_km
-
-        km_clusters_path = processed_dir / f"student_clusters_v7_kmeans_k{k}.parquet"
-        results_df_km.to_parquet(km_clusters_path, index=False)
-        logger.info("Saved K-Means clustering results (k=%d) to %s", k, km_clusters_path)
-
-        profiles = (
-            results_df_km.groupby("KMeans_Cluster", as_index=False)
-            .agg(
-                n_students=("anon_student_id", "count"),
-                total_absence_percent=("total_absence_percent", "mean"),
-                invalid_ratio=("invalid_ratio", "mean"),
-                absent_subject_count=("absent_subject_count", "mean"),
+            km_sil, km_db = _metrics_scaled(
+                X_scaled,
+                labels_km,
+                f"K-Means (k={k}, run={run_idx})",
+                exclude_noise=False,
             )
-            .sort_values("KMeans_Cluster")
-        )
-        km_profiles_path = metrics_dir / f"cluster_profiles_v7_kmeans_k{k}.parquet"
-        profiles.to_parquet(km_profiles_path, index=False)
-        logger.info("Saved K-Means cluster profiles (k=%d) to %s", k, km_profiles_path)
+            kmeans_rows.append(
+                {
+                    "run": run_idx,
+                    "k": k,
+                    "silhouette": km_sil,
+                    "davies_bouldin": km_db,
+                }
+            )
 
-        plot_df_km = results_df_km.copy()
-        plot_df_km["kmeans_cluster"] = plot_df_km["KMeans_Cluster"]
-        km_plot_path = plots_dir / f"subject_spread_v7_kmeans_k{k}.png"
-        _save_scatter(
-            plot_df_km,
-            hue_col="kmeans_cluster",
-            title=f"Total absence % vs absent subject count (K-Means, k={k}, v7)",
-            out_path=km_plot_path,
-            x="total_absence_percent",
-            y="absent_subject_count",
-            xlabel="Total absence %",
-            ylabel="Absent subject count",
-        )
+            if run_idx != N_RUNS_PER_VALUE:
+                continue
 
-        if k == KMEANS_CLUSTERS:
-            labels_km_for_summary = labels_km
-            km_sil_for_summary = km_sil
-            km_db_for_summary = km_db
-            results_df_km.to_parquet(path_clusters_v7, index=False)
-            logger.info("Saved default K-Means results (k=%d) to %s", k, path_clusters_v7)
-            profiles.to_parquet(path_profiles, index=False)
-            logger.info("Saved default K-Means profiles (k=%d) to %s", k, path_profiles)
+            results_df_km = student_df.copy()
+            results_df_km["KMeans_Cluster"] = labels_km
+
+            km_clusters_path = processed_dir / f"student_clusters_kmeans_k{k}_v7.parquet"
+            results_df_km.to_parquet(km_clusters_path, index=False)
+            logger.info("Saved K-Means clustering results (k=%d) to %s", k, km_clusters_path)
+
+            profiles = (
+                results_df_km.groupby("KMeans_Cluster", as_index=False)
+                .agg(
+                    n_students=("anon_student_id", "count"),
+                    total_absence_percent=("total_absence_percent", "mean"),
+                    invalid_ratio=("invalid_ratio", "mean"),
+                    absent_subject_count=("absent_subject_count", "mean"),
+                )
+                .sort_values("KMeans_Cluster")
+            )
+            km_profiles_path = metrics_dir / f"cluster_profiles_kmeans_k{k}_v7.parquet"
+            profiles.to_parquet(km_profiles_path, index=False)
+            logger.info("Saved K-Means cluster profiles (k=%d) to %s", k, km_profiles_path)
+
+            plot_df_km = results_df_km.copy()
+            plot_df_km["kmeans_cluster"] = plot_df_km["KMeans_Cluster"]
+            km_plot_path = plots_dir / f"subject_spread_kmeans_k{k}_v7.png"
             _save_scatter(
                 plot_df_km,
                 hue_col="kmeans_cluster",
-                title="Total absence % vs absent subject count (K-Means, v7)",
-                out_path=plot_subject,
+                title=f"Total absence % vs absent subject count (K-Means, k={k}, v7)",
+                out_path=km_plot_path,
                 x="total_absence_percent",
                 y="absent_subject_count",
                 xlabel="Total absence %",
                 ylabel="Absent subject count",
             )
 
+            if k == KMEANS_CLUSTERS:
+                labels_km_for_summary = labels_km
+                km_sil_for_summary = km_sil
+                km_db_for_summary = km_db
+                results_df_km.to_parquet(path_clusters_v7, index=False)
+                logger.info("Saved default K-Means results (k=%d) to %s", k, path_clusters_v7)
+                profiles.to_parquet(path_profiles, index=False)
+                logger.info("Saved default K-Means profiles (k=%d) to %s", k, path_profiles)
+                _save_scatter(
+                    plot_df_km,
+                    hue_col="kmeans_cluster",
+                    title="Total absence % vs absent subject count (K-Means, v7)",
+                    out_path=plot_subject,
+                    x="total_absence_percent",
+                    y="absent_subject_count",
+                    xlabel="Total absence %",
+                    ylabel="Absent subject count",
+                )
+                _save_scatter(
+                    plot_df_km,
+                    hue_col="kmeans_cluster",
+                    title="Total absence % vs invalid ratio (K-Means, v7)",
+                    out_path=plot_kmeans_ratio,
+                    x="total_absence_percent",
+                    y="invalid_ratio",
+                    xlabel="Total absence %",
+                    ylabel="Invalid ratio",
+                )
+
     for profile_name, eps, min_samples in DBSCAN_CONFIG_OPTIONS:
-        logger.info("--- DBSCAN (%s: eps=%s, min_samples=%s) ---", profile_name, eps, min_samples)
-        dbs = DBSCAN(eps=eps, min_samples=min_samples)
-        labels_db = dbs.fit_predict(X_scaled)
-        n_noise = int((labels_db == -1).sum())
-        noise_share = n_noise / len(labels_db)
-        logger.info(
-            "DBSCAN: %d / %d points labeled noise (-1) (%.1f%%)",
-            n_noise,
-            len(labels_db),
-            100.0 * noise_share,
-        )
-        if noise_share >= NOISE_INFO_THRESHOLD:
+        for run_idx in range(1, N_RUNS_PER_VALUE + 1):
             logger.info(
-                "DBSCAN: many points are noise — common for a first pass on scaled student-level data; "
-                "try tuning eps or min_samples if you want denser clusters."
+                "--- DBSCAN (%s: eps=%s, min_samples=%s, run=%s/%s) ---",
+                profile_name,
+                eps,
+                min_samples,
+                run_idx,
+                N_RUNS_PER_VALUE,
             )
-        if len(np.unique(labels_db)) < 2 or (labels_db == -1).all():
-            logger.info("DBSCAN: skipped Silhouette / Davies–Bouldin (degenerate clustering)")
-            db_sil, db_db = None, None
-        else:
-            db_sil, db_db = _metrics_scaled(
-                X_scaled,
-                labels_db,
-                f"DBSCAN ({profile_name})",
-                exclude_noise=True,
+            dbs = DBSCAN(eps=eps, min_samples=min_samples)
+            labels_db = dbs.fit_predict(X_scaled)
+            n_noise = int((labels_db == -1).sum())
+            noise_share = n_noise / len(labels_db)
+            logger.info(
+                "DBSCAN: %d / %d points labeled noise (-1) (%.1f%%)",
+                n_noise,
+                len(labels_db),
+                100.0 * noise_share,
+            )
+            if noise_share >= NOISE_INFO_THRESHOLD:
+                logger.info(
+                    "DBSCAN: many points are noise — common for a first pass on scaled student-level data; "
+                    "try tuning eps or min_samples if you want denser clusters."
+                )
+            if len(np.unique(labels_db)) < 2 or (labels_db == -1).all():
+                logger.info("DBSCAN: skipped Silhouette / Davies–Bouldin (degenerate clustering)")
+                db_sil, db_db = None, None
+            else:
+                db_sil, db_db = _metrics_scaled(
+                    X_scaled,
+                    labels_db,
+                    f"DBSCAN ({profile_name}, run={run_idx})",
+                    exclude_noise=True,
+                )
+
+            dbscan_rows.append(
+                {
+                    "run": run_idx,
+                    "profile": profile_name,
+                    "eps": eps,
+                    "min_samples": min_samples,
+                    "silhouette": db_sil,
+                    "davies_bouldin": db_db,
+                }
             )
 
-        dbscan_rows.append(
-            {
-                "profile": profile_name,
-                "eps": eps,
-                "min_samples": min_samples,
-                "silhouette": db_sil,
-                "davies_bouldin": db_db,
-            }
-        )
+            if run_idx != N_RUNS_PER_VALUE:
+                continue
 
-        results_df_db = student_df.copy()
-        results_df_db["DBSCAN_Cluster"] = labels_db
-        db_clusters_path = processed_dir / f"student_clusters_v7_dbscan_{profile_name}.parquet"
-        results_df_db.to_parquet(db_clusters_path, index=False)
-        logger.info("Saved DBSCAN clustering results (%s) to %s", profile_name, db_clusters_path)
+            results_df_db = student_df.copy()
+            results_df_db["DBSCAN_Cluster"] = labels_db
+            db_clusters_path = processed_dir / f"student_clusters_dbscan_{profile_name}_v7.parquet"
+            results_df_db.to_parquet(db_clusters_path, index=False)
+            logger.info("Saved DBSCAN clustering results (%s) to %s", profile_name, db_clusters_path)
 
-        plot_df_db = results_df_db.copy()
-        plot_df_db["dbscan_cluster"] = plot_df_db["DBSCAN_Cluster"]
-        db_plot_path = plots_dir / f"subject_spread_v7_dbscan_{profile_name}.png"
-        _save_scatter(
-            plot_df_db,
-            hue_col="dbscan_cluster",
-            title=f"Total absence % vs absent subject count (DBSCAN {profile_name}, v7)",
-            out_path=db_plot_path,
-            x="total_absence_percent",
-            y="absent_subject_count",
-            xlabel="Total absence %",
-            ylabel="Absent subject count",
-        )
+            plot_df_db = results_df_db.copy()
+            plot_df_db["dbscan_cluster"] = plot_df_db["DBSCAN_Cluster"]
+            db_plot_path = plots_dir / f"dbscan_spread_{profile_name}_v7.png"
+            _save_scatter(
+                plot_df_db,
+                hue_col="dbscan_cluster",
+                title=f"Total absence % vs invalid ratio (DBSCAN {profile_name}, v7)",
+                out_path=db_plot_path,
+                x="total_absence_percent",
+                y="invalid_ratio",
+                xlabel="Total absence %",
+                ylabel="Invalid ratio",
+            )
 
-        if eps == DBSCAN_EPS and min_samples == DBSCAN_MIN_SAMPLES:
-            labels_db_for_summary = labels_db
-            db_sil_for_summary = db_sil
-            db_db_for_summary = db_db
+            if eps == DBSCAN_EPS and min_samples == DBSCAN_MIN_SAMPLES:
+                labels_db_for_summary = labels_db
+                db_sil_for_summary = db_sil
+                db_db_for_summary = db_db
+                _save_scatter(
+                    plot_df_db,
+                    hue_col="dbscan_cluster",
+                    title="Total absence % vs invalid ratio (DBSCAN, v7)",
+                    out_path=plot_dbscan,
+                    x="total_absence_percent",
+                    y="invalid_ratio",
+                    xlabel="Total absence %",
+                    ylabel="Invalid ratio",
+                )
 
     _write_metrics_file(path_metrics, kmeans_rows, dbscan_rows)
 
@@ -458,6 +601,9 @@ def main() -> None:
             km_db_for_summary,
             db_sil_for_summary,
             db_db_for_summary,
+            KMEANS_CLUSTERS,
+            DBSCAN_EPS,
+            DBSCAN_MIN_SAMPLES,
         )
 
 
