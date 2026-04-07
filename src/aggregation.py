@@ -20,10 +20,13 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Metadata for reporting (excluded from clustering in main).
-    meta = df.groupby("anon_student_id", as_index=False).agg(
-        grade=("grade", "first"),
-        gender=("gender", "first"),
-    )
+    meta_agg: dict[str, tuple[str, str]] = {
+        "grade": ("grade", "first"),
+        "gender": ("gender", "first"),
+    }
+    if "year_of_birth" in df.columns:
+        meta_agg["year_of_birth"] = ("year_of_birth", "first")
+    meta = df.groupby("anon_student_id", as_index=False).agg(**meta_agg)
     agg = agg.merge(meta, on="anon_student_id", how="left")
 
     schema = agg["schema_minutes"].fillna(0)
@@ -45,18 +48,6 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     invalid_ratio = np.zeros_like(total_m)
     np.divide(inv, total_m, out=invalid_ratio, where=total_m > 0)
     agg["invalid_ratio"] = invalid_ratio
-
-    # Feature engineering: count distinct subjects where the student had any absence.
-    absent_mask = df["absence_minutes_total"].fillna(0) > 0
-    absent_subjects = (
-        df.loc[absent_mask]
-        .groupby("anon_student_id", as_index=False)["subject"]
-        .nunique()
-        .rename(columns={"subject": "absent_subject_count"})
-    )
-    agg = agg.merge(absent_subjects, on="anon_student_id", how="left")
-    agg["absent_subject_count"] = agg["absent_subject_count"].fillna(0).astype(np.int64)
-    logger.info("Feature Engineering: Added 'absent_subject_count' to student profiles.")
 
     n_before = len(agg)
     agg = agg.loc[agg["schema_minutes"] >= MIN_SCHEMA_MINUTES_TOTAL].copy()

@@ -1,7 +1,8 @@
-"""Orchestrate Parquet load, clean, aggregate, cluster, and plot (Version 7).
+"""Orchestrate Parquet load, clean, aggregate, cluster, and plot (Version 9).
 
 Student-level clustering only (no school-level analysis). Metadata columns
-(anon_student_id, grade, gender) are retained for export but excluded from scaling.
+(anon_student_id, grade, gender, year_of_birth when present) are retained for export
+but excluded from scaling.
 """
 
 from __future__ import annotations
@@ -23,28 +24,33 @@ from src.processing import FEATURES, clean_data, scale_data
 
 logger = logging.getLogger(__name__)
 
-# Version 7 — clustering hyperparameters
+# Version 9 — clustering hyperparameters
 KMEANS_CLUSTERS = 5
 DBSCAN_EPS = 0.55
 DBSCAN_MIN_SAMPLES = 10
 NOISE_INFO_THRESHOLD = 0.2
-KMEANS_CLUSTER_OPTIONS = [3, 5, 8]
+KMEANS_CLUSTER_OPTIONS = [3, 4, 5, 6]
 DBSCAN_CONFIG_OPTIONS = [
+    ("very_strict", 0.3, 20),
     ("strict", 0.4, 15),
     ("medium", 0.55, 10),
     ("lenient", 0.8, 5),
 ]
-N_RUNS_PER_VALUE = 4
+N_RUNS_PER_VALUE = 5
 
 # Training features only (metadata excluded from StandardScaler).
 PROFILE_FEATURES = [
     "total_absence_percent",
     "invalid_ratio",
-    "absent_subject_count",
 ]
-METADATA_COLUMNS = ["anon_student_id", "grade", "gender"]
+# Required after aggregation; year_of_birth is merged when present in lesson data.
+METADATA_REQUIRED = ["anon_student_id", "grade", "gender"]
+METADATA_COLUMNS = ["anon_student_id", "grade", "gender", "year_of_birth"]
 
 PLOT_ALPHA = 0.6
+# Jitter for invalid_ratio only (2D scatter visualization; does not affect clustering).
+INVALID_RATIO_JITTER_SCALE = 0.015
+JITTER_RNG = np.random.default_rng(42)
 
 
 def _repo_root() -> Path:
@@ -106,6 +112,12 @@ def _log_kmeans_cluster_centers(
         logger.info("  Cluster %d: %s", i, parts)
 
 
+def _hue_order_for_legend(series: pd.Series) -> list:
+    """Sort cluster IDs numerically; DBSCAN noise (-1) last."""
+    unique = series.dropna().unique().tolist()
+    return sorted(unique, key=lambda z: (z == -1, z))
+
+
 def _save_scatter(
     plot_df: pd.DataFrame,
     hue_col: str,
@@ -116,83 +128,42 @@ def _save_scatter(
     xlabel: str,
     ylabel: str,
 ) -> None:
+    """2D scatter (no centroid markers). Jitter for ``invalid_ratio`` only on the plotted copy."""
+    plot_data = plot_df.copy()
+    if y == "invalid_ratio":
+        plot_data = plot_data.copy()
+        plot_data[y] = plot_data[y] + JITTER_RNG.normal(
+            0.0, INVALID_RATIO_JITTER_SCALE, size=len(plot_data)
+        )
+
+    hue_order = _hue_order_for_legend(plot_data[hue_col])
+
     fig, ax = plt.subplots(figsize=(9, 6))
     sns.scatterplot(
-        data=plot_df,
+        data=plot_data,
         x=x,
         y=y,
         hue=hue_col,
+        hue_order=hue_order,
         palette="viridis",
         alpha=PLOT_ALPHA,
         ax=ax,
     )
+
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
+    handles, leg_labels = ax.get_legend_handles_labels()
+    ax.legend(handles, leg_labels, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     logger.info("Saved plot to %s", out_path)
-    if plt.get_backend().lower() != "agg":
-        plt.show()
-    else:
-        plt.close(fig)
+    # Always close; do not plt.show() — interactive backends would block the pipeline
+    # before model_comparison / raw_data_summary are written.
+    plt.close(fig)
 
 
-def _plot_feature_correlation(df: pd.DataFrame, cols: list[str], out_path: Path) -> None:
-    corr = df[cols].corr()
-    fig, ax = plt.subplots(figsize=(6, 5))
-    sns.heatmap(corr, annot=True, fmt=".3f", cmap="viridis", ax=ax, vmin=-1, vmax=1)
-    ax.set_title("Feature correlation (student-level, v7)")
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    logger.info("Saved correlation heatmap to %s", out_path)
-    if plt.get_backend().lower() != "agg":
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def _plot_kmeans_cluster_counts(results_df: pd.DataFrame, out_path: Path) -> None:
-    counts = (
-        results_df["KMeans_Cluster"]
-        .value_counts()
-        .sort_index()
-        .rename_axis("KMeans_Cluster")
-        .reset_index(name="n_students")
-    )
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sns.barplot(data=counts, x="KMeans_Cluster", y="n_students", color="steelblue", ax=ax)
-    ax.set_title("Students per K-Means cluster (v7)")
-    ax.set_xlabel("KMeans cluster")
-    ax.set_ylabel("Number of students")
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    logger.info("Saved K-Means counts plot to %s", out_path)
-    if plt.get_backend().lower() != "agg":
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def _plot_kmeans_feature_boxplots(results_df: pd.DataFrame, out_path: Path) -> None:
-    features = ["total_absence_percent", "invalid_ratio", "absent_subject_count"]
-    fig, axes = plt.subplots(1, len(features), figsize=(18, 5), sharex=False)
-    for ax, feature in zip(axes, features):
-        sns.boxplot(data=results_df, x="KMeans_Cluster", y=feature, ax=ax)
-        ax.set_title(feature)
-        ax.set_xlabel("KMeans cluster")
-        ax.set_ylabel(feature)
-    fig.suptitle("Cluster feature distributions (v7)")
-    plt.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    logger.info("Saved K-Means boxplots to %s", out_path)
-    if plt.get_backend().lower() != "agg":
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def _write_raw_data_summary_v7(
+def _write_raw_data_summary_v9(
     path: Path,
     student_df: pd.DataFrame,
     labels_km: np.ndarray,
@@ -205,10 +176,10 @@ def _write_raw_data_summary_v7(
     run_eps: float,
     run_min_samples: int,
 ) -> None:
-    """Human-readable summary for manual verification (does not overwrite v5 outputs)."""
+    """Human-readable summary for manual verification."""
     n = len(student_df)
     lines: list[str] = []
-    lines.append("RAW DATA SUMMARY (Version 7)")
+    lines.append("RAW DATA SUMMARY (Version 9)")
     lines.append("=" * 64)
     lines.append("")
 
@@ -268,10 +239,10 @@ def _write_raw_data_summary_v7(
     lines.append(f"\tSilhouette score:\t\t{db_sil if db_sil is not None else 'n/a (skipped)'}")
     lines.append(f"\tDavies–Bouldin index:\t\t{db_db if db_db is not None else 'n/a (skipped)'}")
     lines.append("")
-    lines.append("(End of raw_data_summary_v7.txt)")
+    lines.append("(End of raw_data_summary_v9.txt)")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    logger.info("Wrote raw data summary (v7) to %s", path)
+    logger.info("Wrote raw data summary (v9) to %s", path)
 
 
 def _write_metrics_file(
@@ -285,8 +256,9 @@ def _write_metrics_file(
         return f"{float(value):.6f}"
 
     lines = [
-        "Model comparison grid (Version 7)",
-        "================================",
+        "Model comparison (Version 9) — full grid + summary",
+        "==================================================",
+        f"K-Means summary: mean and sample std (ddof=1) across {N_RUNS_PER_VALUE} runs per k.",
         "",
         "K-Means",
         "-------",
@@ -332,6 +304,22 @@ def _write_metrics_file(
                 f"{int(row['k'])}\t{_fmt_num(row['silhouette_mean'])}\t{_fmt_num(row['silhouette_std'])}\t{_fmt_num(row['davies_mean'])}\t{_fmt_num(row['davies_std'])}"
             )
 
+        grid_path = path.parent / "model_comparison_grid_v9.txt"
+        grid_lines = [
+            "K-Means grid metrics (Version 9)",
+            "--------------------------------",
+            f"Silhouette mean and sample std (ddof=1) across {N_RUNS_PER_VALUE} runs per k.",
+            "Use with model_comparison_v9.txt for full grid and DBSCAN results.",
+            "",
+            "k\tSilhouette_mean\tSilhouette_std_across_runs",
+        ]
+        for _, row in km_summary.iterrows():
+            grid_lines.append(
+                f"{int(row['k'])}\t{_fmt_num(row['silhouette_mean'])}\t{_fmt_num(row['silhouette_std'])}"
+            )
+        grid_path.write_text("\n".join(grid_lines) + "\n", encoding="utf-8")
+        logger.info("Wrote K-Means grid metrics to %s", grid_path)
+
     if dbscan_rows:
         db_df = pd.DataFrame(dbscan_rows)
         db_df["silhouette"] = pd.to_numeric(db_df["silhouette"], errors="coerce")
@@ -358,6 +346,32 @@ def _write_metrics_file(
                 f"{row['profile']}\t{row['eps']}\t{int(row['min_samples'])}\t{_fmt_num(row['silhouette_mean'])}\t{_fmt_num(row['silhouette_std'])}\t{_fmt_num(row['davies_mean'])}\t{_fmt_num(row['davies_std'])}"
             )
 
+    if kmeans_rows:
+        km_log = pd.DataFrame(kmeans_rows)
+        km_log["silhouette"] = pd.to_numeric(km_log["silhouette"], errors="coerce")
+        for k in sorted(km_log["k"].unique()):
+            sils = km_log.loc[km_log["k"] == k, "silhouette"].dropna()
+            if len(sils) >= 2:
+                std = float(np.std(sils, ddof=1))
+                logger.info(
+                    "K-Means grid: k=%d — Silhouette std across %d runs: %.6f",
+                    int(k),
+                    len(sils),
+                    std,
+                )
+            elif len(sils) == 1:
+                logger.info(
+                    "K-Means grid: k=%d — Silhouette std across %d runs: 0.000000 (single valid run)",
+                    int(k),
+                    len(sils),
+                )
+            else:
+                logger.info(
+                    "K-Means grid: k=%d — Silhouette std across %d runs: n/a",
+                    int(k),
+                    len(sils),
+                )
+
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info("Wrote metrics to %s", path)
 
@@ -369,16 +383,15 @@ def main() -> None:
     raw_path = root / "data" / "raw" / "lyckeboskolan_absence_lasaret2425_v6.parquet"
     processed_dir, plots_dir, metrics_dir = _ensure_output_dirs(root)
 
-    path_features_v7 = processed_dir / "student_features_v7.parquet"
-    path_clusters_v7 = processed_dir / "student_clusters_v7.parquet"
-    plot_subject = plots_dir / "subject_spread_v7.png"
-    plot_kmeans_ratio = plots_dir / "kmeans_absence_ratio_v7.png"
-    plot_dbscan = plots_dir / "dbscan_spread_v7.png"
-    path_metrics = metrics_dir / "model_comparison_v7.txt"
-    path_profiles = metrics_dir / "cluster_profiles_v7.parquet"
-    path_raw_summary = metrics_dir / "raw_data_summary_v7.txt"
+    path_features_v9 = processed_dir / "student_features_v9.parquet"
+    path_clusters_v9 = processed_dir / "student_clusters_v9.parquet"
+    plot_kmeans_ratio = plots_dir / "kmeans_absence_ratio_v9.png"
+    plot_dbscan = plots_dir / "dbscan_spread_v9.png"
+    path_metrics = metrics_dir / "model_comparison_v9.txt"
+    path_profiles = metrics_dir / "cluster_profiles_v9.parquet"
+    path_raw_summary = metrics_dir / "raw_data_summary_v9.txt"
 
-    logger.info("--- Pipeline start (v7) ---")
+    logger.info("--- Pipeline start (v9) ---")
     logger.info("Data file: %s", raw_path)
 
     raw = load_raw_data(str(raw_path))
@@ -387,24 +400,27 @@ def main() -> None:
     student_df = aggregate_to_student_level(cleaned)
     student_df = student_df.reset_index(drop=True)
 
-    missing_meta = [c for c in METADATA_COLUMNS if c not in student_df.columns]
+    missing_meta = [c for c in METADATA_REQUIRED if c not in student_df.columns]
     if missing_meta:
         raise ValueError(f"Expected metadata columns missing after aggregation: {missing_meta}")
 
-    student_df.to_parquet(path_features_v7, index=False)
-    logger.info("Saved student-level features (v7) to %s", path_features_v7)
+    student_df.to_parquet(path_features_v9, index=False)
+    logger.info("Saved student-level features (v9) to %s", path_features_v9)
 
     assert set(FEATURES) == set(PROFILE_FEATURES)
     logger.info(
         "Training features for scaling/clustering: %s (metadata excluded: %s)",
         FEATURES,
-        [c for c in METADATA_COLUMNS if c not in FEATURES],
+        [c for c in METADATA_COLUMNS if c in student_df.columns and c not in FEATURES],
     )
     logger.info(
         "Starting Feature Selection: Using %d variables for clustering.",
         len(FEATURES),
     )
+    assert set(FEATURES).isdisjoint({"grade", "gender", "anon_student_id", "year_of_birth"})
+    # student_df may include metadata columns; scaling uses FEATURES only.
     X_scaled, scaler = scale_data(student_df, FEATURES)
+    assert list(X_scaled.columns) == FEATURES
 
     kmeans_rows: list[dict[str, float | int | None]] = []
     dbscan_rows: list[dict[str, float | int | str | None]] = []
@@ -443,7 +459,7 @@ def main() -> None:
             results_df_km = student_df.copy()
             results_df_km["KMeans_Cluster"] = labels_km
 
-            km_clusters_path = processed_dir / f"student_clusters_kmeans_k{k}_v7.parquet"
+            km_clusters_path = processed_dir / f"student_clusters_kmeans_k{k}_v9.parquet"
             results_df_km.to_parquet(km_clusters_path, index=False)
             logger.info("Saved K-Means clustering results (k=%d) to %s", k, km_clusters_path)
 
@@ -453,50 +469,39 @@ def main() -> None:
                     n_students=("anon_student_id", "count"),
                     total_absence_percent=("total_absence_percent", "mean"),
                     invalid_ratio=("invalid_ratio", "mean"),
-                    absent_subject_count=("absent_subject_count", "mean"),
                 )
                 .sort_values("KMeans_Cluster")
             )
-            km_profiles_path = metrics_dir / f"cluster_profiles_kmeans_k{k}_v7.parquet"
+            km_profiles_path = metrics_dir / f"cluster_profiles_kmeans_k{k}_v9.parquet"
             profiles.to_parquet(km_profiles_path, index=False)
             logger.info("Saved K-Means cluster profiles (k=%d) to %s", k, km_profiles_path)
 
             plot_df_km = results_df_km.copy()
             plot_df_km["kmeans_cluster"] = plot_df_km["KMeans_Cluster"]
-            km_plot_path = plots_dir / f"subject_spread_kmeans_k{k}_v7.png"
+            km_plot_path = plots_dir / f"kmeans_absence_ratio_k{k}_v9.png"
             _save_scatter(
                 plot_df_km,
                 hue_col="kmeans_cluster",
-                title=f"Total absence % vs absent subject count (K-Means, k={k}, v7)",
+                title=f"Total absence % vs invalid ratio (K-Means, k={k}, v9)",
                 out_path=km_plot_path,
                 x="total_absence_percent",
-                y="absent_subject_count",
+                y="invalid_ratio",
                 xlabel="Total absence %",
-                ylabel="Absent subject count",
+                ylabel="Invalid ratio",
             )
 
             if k == KMEANS_CLUSTERS:
                 labels_km_for_summary = labels_km
                 km_sil_for_summary = km_sil
                 km_db_for_summary = km_db
-                results_df_km.to_parquet(path_clusters_v7, index=False)
-                logger.info("Saved default K-Means results (k=%d) to %s", k, path_clusters_v7)
+                results_df_km.to_parquet(path_clusters_v9, index=False)
+                logger.info("Saved default K-Means results (k=%d) to %s", k, path_clusters_v9)
                 profiles.to_parquet(path_profiles, index=False)
                 logger.info("Saved default K-Means profiles (k=%d) to %s", k, path_profiles)
                 _save_scatter(
                     plot_df_km,
                     hue_col="kmeans_cluster",
-                    title="Total absence % vs absent subject count (K-Means, v7)",
-                    out_path=plot_subject,
-                    x="total_absence_percent",
-                    y="absent_subject_count",
-                    xlabel="Total absence %",
-                    ylabel="Absent subject count",
-                )
-                _save_scatter(
-                    plot_df_km,
-                    hue_col="kmeans_cluster",
-                    title="Total absence % vs invalid ratio (K-Means, v7)",
+                    title="Total absence % vs invalid ratio (K-Means, v9)",
                     out_path=plot_kmeans_ratio,
                     x="total_absence_percent",
                     y="invalid_ratio",
@@ -556,17 +561,17 @@ def main() -> None:
 
             results_df_db = student_df.copy()
             results_df_db["DBSCAN_Cluster"] = labels_db
-            db_clusters_path = processed_dir / f"student_clusters_dbscan_{profile_name}_v7.parquet"
+            db_clusters_path = processed_dir / f"student_clusters_dbscan_{profile_name}_v9.parquet"
             results_df_db.to_parquet(db_clusters_path, index=False)
             logger.info("Saved DBSCAN clustering results (%s) to %s", profile_name, db_clusters_path)
 
             plot_df_db = results_df_db.copy()
             plot_df_db["dbscan_cluster"] = plot_df_db["DBSCAN_Cluster"]
-            db_plot_path = plots_dir / f"dbscan_spread_{profile_name}_v7.png"
+            db_plot_path = plots_dir / f"dbscan_spread_{profile_name}_v9.png"
             _save_scatter(
                 plot_df_db,
                 hue_col="dbscan_cluster",
-                title=f"Total absence % vs invalid ratio (DBSCAN {profile_name}, v7)",
+                title=f"Total absence % vs invalid ratio (DBSCAN {profile_name}, v9)",
                 out_path=db_plot_path,
                 x="total_absence_percent",
                 y="invalid_ratio",
@@ -581,7 +586,7 @@ def main() -> None:
                 _save_scatter(
                     plot_df_db,
                     hue_col="dbscan_cluster",
-                    title="Total absence % vs invalid ratio (DBSCAN, v7)",
+                    title="Total absence % vs invalid ratio (DBSCAN, v9)",
                     out_path=plot_dbscan,
                     x="total_absence_percent",
                     y="invalid_ratio",
@@ -592,7 +597,7 @@ def main() -> None:
     _write_metrics_file(path_metrics, kmeans_rows, dbscan_rows)
 
     if labels_km_for_summary is not None and labels_db_for_summary is not None:
-        _write_raw_data_summary_v7(
+        _write_raw_data_summary_v9(
             path_raw_summary,
             student_df,
             labels_km_for_summary,

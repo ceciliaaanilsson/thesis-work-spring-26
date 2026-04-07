@@ -6,3 +6,6 @@ __pycache__/
 # Data files (keep large/sensitive data out of git)
 data/
 *.parquet
+
+# Output files
+output/**

@@ -7,13 +7,17 @@ from sklearn.preprocessing import StandardScaler
 
 logger = logging.getLogger(__name__)
 
+# Causes treated as school-sanctioned presence (not absence) — see clean_data.
+SCHOOL_SANCTIONED_PRESENCE_CAUSES = frozenset({"OTHERACTIVITY", "WORKBASEDLEARNING"})
+
 # Feature selection (thesis: Data Preprocessing — choose inputs for clustering).
-# These columns exist after student-level aggregation. Metadata (anon_student_id,
-# grade, gender) is merged in aggregation but never passed to StandardScaler.
+# Two-dimensional clustering in scaled space: total_absence_percent, invalid_ratio.
+# Sanctioned causes are zeroed in clean_data before aggregation.
+# Metadata (anon_student_id, grade, gender, year_of_birth) is merged in aggregation
+# but never passed to StandardScaler.
 FEATURES = [
     "total_absence_percent",
     "invalid_ratio",
-    "absent_subject_count",
 ]
 
 
@@ -28,6 +32,22 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         removed,
         len(out),
     )
+
+    mask = out["cause_ext"].isin(SCHOOL_SANCTIONED_PRESENCE_CAUSES)
+    n_sanctioned = int(mask.sum())
+    if n_sanctioned > 0:
+        abs_before = out.loc[mask, "absence_minutes_total"].fillna(0).astype(float)
+        inv_before = out.loc[mask, "invalid_absence_minutes"].fillna(0).astype(float)
+        total_minutes = float(abs_before.sum() + inv_before.sum())
+        out.loc[mask, "absence_minutes_total"] = 0
+        out.loc[mask, "invalid_absence_minutes"] = 0
+        logger.info(
+            "Sanctioned presence: zeroed absence for %d rows (OTHERACTIVITY/WORKBASEDLEARNING); "
+            "~%.1f total minutes excluded from absence totals",
+            n_sanctioned,
+            total_minutes,
+        )
+
     return out
 
 
