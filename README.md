@@ -36,6 +36,13 @@ Dependencies include `pandas`, `scikit-learn`, `xgboost`, and `seaborn` for plot
 python -m src.main
 ```
 
+For comparison between clustering with vs without absence features on the full
+grouped student dataset:
+
+```bash
+python -m src.main_compare_absence
+```
+
 ## Baseline analysis
 
 Use the quick inspection script to get a first overview of the dataset:

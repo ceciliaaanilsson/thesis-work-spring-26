@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 MIN_SCHEMA_MINUTES_TOTAL = 500
 
 
-def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_to_student_level(
+    df: pd.DataFrame,
+    min_schema_minutes_total: int | None = MIN_SCHEMA_MINUTES_TOTAL,
+) -> pd.DataFrame:
     """Aggregation (thesis: Data Preprocessing — student-level roll-up and derived metrics)."""
     agg = df.groupby("anon_student_id", as_index=False).agg(
         absence_minutes_total=("absence_minutes_total", "sum"),
@@ -49,16 +52,19 @@ def aggregate_to_student_level(df: pd.DataFrame) -> pd.DataFrame:
     np.divide(inv, total_m, out=invalid_ratio, where=total_m > 0)
     agg["invalid_ratio"] = invalid_ratio
 
-    n_before = len(agg)
-    agg = agg.loc[agg["schema_minutes"] >= MIN_SCHEMA_MINUTES_TOTAL].copy()
-    n_removed = n_before - len(agg)
-    logger.info(
-        "Reliability filter: removed %d students with total scheduled minutes (schema_minutes) < %d; "
-        "%d students retained.",
-        n_removed,
-        MIN_SCHEMA_MINUTES_TOTAL,
-        len(agg),
-    )
+    if min_schema_minutes_total is not None and min_schema_minutes_total > 0:
+        n_before = len(agg)
+        agg = agg.loc[agg["schema_minutes"] >= min_schema_minutes_total].copy()
+        n_removed = n_before - len(agg)
+        logger.info(
+            "Reliability filter: removed %d students with total scheduled minutes (schema_minutes) < %d; "
+            "%d students retained.",
+            n_removed,
+            min_schema_minutes_total,
+            len(agg),
+        )
+    else:
+        logger.info("Reliability filter disabled: using all grouped students.")
 
     logger.info("Aggregation: %d unique students (rows)", len(agg))
     return agg

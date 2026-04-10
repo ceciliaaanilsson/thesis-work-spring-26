@@ -51,6 +51,26 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def encode_categorical_values(
+    df: pd.DataFrame,
+    categorical_cols: list[str],
+    drop_first: bool = False,
+) -> pd.DataFrame:
+    """Encode categorical columns with one-hot encoding for ML-ready numeric input."""
+    available = [c for c in categorical_cols if c in df.columns]
+    if not available:
+        logger.info("Encoding: no categorical columns found to encode")
+        return df.copy()
+
+    encoded = pd.get_dummies(df, columns=available, drop_first=drop_first, dtype=int)
+    logger.info(
+        "Encoding: one-hot encoded columns %s -> %d output columns",
+        available,
+        encoded.shape[1],
+    )
+    return encoded
+
+
 def scale_data(
     df: pd.DataFrame, feature_cols: list[str]
 ) -> tuple[pd.DataFrame, StandardScaler]:
