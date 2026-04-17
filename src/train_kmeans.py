@@ -308,25 +308,9 @@ def main() -> None:
     df = df.copy()
     df["cluster_id"] = labels
 
-    if len(FEATURES) == 2 and args.scatter_output is not None:
-        plot_2d_analysis(
-            df,
-            FEATURES[0],
-            FEATURES[1],
-            labels,
-            out_path=args.scatter_output,
-            title=f"KMeans k={n_clusters} (seed={args.random_state})",
-        )
-        print(f"Sparade 2D-validering: {args.scatter_output.resolve()}")
-    else:
-        print("2D-validering: n/a (kräver exakt 2 features)")
-
     sil: float | None = None
     if n_clusters >= 2 and len(df) > n_clusters:
         sil = float(silhouette_score(X_scaled, labels, random_state=args.random_state))
-        print(f"Silhouette score (k={n_clusters}): {sil:.4f}")
-    else:
-        print("Silhouette score: n/a (kräver minst 2 kluster och fler än k elever)")
 
     val_table = None
     if "reserved_absence_minutes_total" in df.columns:
@@ -335,8 +319,6 @@ def main() -> None:
             .agg(mean_minutes="mean", median_minutes="median", n="count")
             .reset_index()
         )
-        print("\nValidering (volym, ej input): reserved_absence_minutes_total per kluster")
-        print(val_table.to_string(index=False))
 
     summary = (
         df.groupby("cluster_id", sort=True)[FEATURES]
@@ -354,18 +336,14 @@ def main() -> None:
     summary["random_state"] = args.random_state
     summary["silhouette"] = sil if sil is not None else np.nan
 
-    print("\nKlusterprofiler (medelvärden av features, oskalade):")
-    print(summary.round(6).to_string(index=False))
-
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
-    args.summary_output.write_text(_to_markdown_table(summary.round(6)), encoding="utf-8")
-    print(f"Sparade klustersammanfattning: {args.summary_output.resolve()}")
+    summary_md = _to_markdown_table(summary.round(6))
+    args.summary_output.write_text(summary_md, encoding="utf-8")
+    print(summary_md, end="")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(args.output, index=False)
     print(f"\nSparade: {args.output.resolve()}  (rader: {len(df)})")
-    if len(dropped_zero):
-        print(f"Antal rader borttagna (alla features = 0): {len(dropped_zero)}")
 
 
 if __name__ == "__main__":

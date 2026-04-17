@@ -87,18 +87,9 @@ def _print_run_tables(
     validation: pd.DataFrame,
     silhouette: float,
 ) -> None:
-    print(f"\n{'=' * 60}")
-    print(f"Run {run_idx + 1}  |  k={k}  |  random_state={seed}")
-    print(f"{'=' * 60}")
-    print("\nAlignerade klusterstorlekar (n elever):")
-    print(aligned_sizes.to_frame("n").to_string())
-    print("\nAlignerade centroids (skalat utrymme):")
-    print(aligned_centroids_df.round(6).to_string())
-    print("\nAlignerade centroids (originalenheter):")
-    print(aligned_centroids_unscaled_df.round(6).to_string())
-    print("\nValidering: medel reserved_absence_minutes_total per kluster:")
-    print(validation.round(2).to_string())
-    print(f"\nSilhouette score: {silhouette:.6f}")
+    # Terminal output intentionally suppressed.
+    # Detailed per-run diagnostics are available via saved artifacts when needed.
+    return
 
 
 def _avg_distance_to_centroid(
@@ -126,23 +117,9 @@ def _typical_representatives(
     k: int,
     n_rep: int = 3,
 ) -> None:
-    print(f"\n{'=' * 60}")
-    print("Typical Cluster Representatives (närmast centroid i skalat utrymme)")
-    print(f"{'=' * 60}")
-    for c in range(k):
-        mask = labels == c
-        idx_all = np.flatnonzero(mask)
-        if len(idx_all) == 0:
-            print(f"\nKluster {c}: inga elever (hoppar över).")
-            continue
-        Xc = X_scaled[mask]
-        dists = np.linalg.norm(Xc - centroids_scaled[c], axis=1)
-        order = np.argsort(dists)[: min(n_rep, len(dists))]
-        chosen = idx_all[order]
-        print(f"\nKluster {c}")
-        sub = df.iloc[chosen][["anon_student_id", *FEATURES]].copy()
-        sub["_dist_to_centroid_scaled"] = dists[order]
-        print(sub.to_string(index=False))
+    # Terminal output intentionally suppressed.
+    # Keep function for potential future use without printing.
+    return
 
 
 def _save_feature_boxplots(
@@ -292,33 +269,10 @@ def _print_best_k_full(
     labels_final = res.aligned_labels_list[-1]
     centroids_final = res.aligned_centroids_list[-1]
 
-    print(f"\n{'#' * 60}")
-    print(f"# Detaljerad diagnostik för valt k = {k} (bästa enligt regel)")
-    print(f"{'#' * 60}")
-
-    print(f"\nPer-run silhouette: {[round(s, 6) for s in res.silhouettes]}")
-    print(f"\nMeta-analys (k={k}): std av klusterstorlek per alignerat id över 4 körningar")
-    for i in range(k):
-        print(f"  Kluster {i}: std = {res.std_per_cluster[i]:.4f}")
-    print(f"  Max std: {res.max_size_std:.4f}")
-    print(f"\nCentroid drift MSE (Run 1 ref vs Run 4 alignerad): {res.mse_drift:.8f}")
-
-    avg_dist = _avg_distance_to_centroid(X_scaled, labels_final, centroids_final, k)
-    print(f"\n{'=' * 60}")
-    print(f"Cluster density (k={k}, sista körningen seed=40): medelavstånd punkt–centroid (skalat L2)")
-    print(f"{'=' * 60}")
-    for c in range(k):
-        print(f"  Kluster {c}: avg distance = {avg_dist[c]:.6f}")
-    _typical_representatives(df, X_scaled, labels_final, centroids_final, k, n_rep=3)
-
     _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
-    print(f"\nSparade boxplot-figur: {boxplot_path.resolve()}")
 
     if len(FEATURES) == 2:
         x_feat, y_feat = FEATURES[0], FEATURES[1]
-        print(
-            f"\n2D-läge (exakt två features): hoppar över PCA — rå scatter {x_feat} vs {y_feat} per seed."
-        )
         fig, axes = plt.subplots(2, 2, figsize=(11, 10))
         for ax, run_idx, seed in zip(axes.ravel(), range(len(SEEDS)), SEEDS):
             sil = float(
@@ -345,24 +299,9 @@ def _print_best_k_full(
         pca_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(pca_path, dpi=150, bbox_inches="tight")
         plt.close()
-        print(f"\nSparade 2D-stabilitetsfigur: {pca_path.resolve()}")
     else:
         pca = PCA(n_components=2, random_state=random_state_extra)
         X_pca = pca.fit_transform(X_scaled)
-        evr = pca.explained_variance_ratio_
-        print(
-            f"\nPCA explained variance ratio — PC1: {evr[0]:.6f}, PC2: {evr[1]:.6f}, summa: {evr.sum():.6f}"
-        )
-        comps = pca.components_
-        print("\nPCA loadings (tolkningstöd): top-3 features per axel (|loading| störst)")
-        for pc_idx, name in enumerate(["PC1", "PC2"]):
-            loadings = np.asarray(comps[pc_idx], dtype=float)
-            order = np.argsort(np.abs(loadings))[::-1]
-            top = order[: min(3, len(order))]
-            parts = [
-                f"{FEATURES[int(j)]} (loading={loadings[int(j)]:+.4f})" for j in top
-            ]
-            print(f"  {name}: " + ", ".join(parts))
 
         fig, axes = plt.subplots(2, 2, figsize=(10, 9))
         for ax, run_idx, seed in zip(axes.ravel(), range(len(SEEDS)), SEEDS):
@@ -391,7 +330,6 @@ def _print_best_k_full(
         pca_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(pca_path, dpi=150, bbox_inches="tight")
         plt.close()
-        print(f"\nSparade PCA-figur: {pca_path.resolve()}")
 
     threshold_size = SIZE_STD_FRAC * N
     stable_size = res.max_size_std < threshold_size
@@ -473,18 +411,13 @@ def main() -> None:
     X_scaled = scaler.fit_transform(X)
     N = len(df)
 
-    print("\nPearson-korrelation (linjärt; känslig för outliers):")
-    print(df[FEATURES].corr(method="pearson").round(4).to_string())
-    print("\nSpearman-korrelation (monotona samband; ofta lämpligare vid skev frånvarodata):")
-    print(df[FEATURES].corr(method="spearman").round(4).to_string())
-
     print(f"\n{'=' * 60}")
     print(f"k-sensitivitet: seeds {SEEDS}, k ∈ {k_list}")
     print(f"{'=' * 60}")
 
     results: list[StabilityRunResult] = []
     for k in k_list:
-        verbose_runs = args.verbose_all_k
+        verbose_runs = False
         res = run_stability_for_k(
             k, df, X_scaled, scaler, args.random_state_extra, verbose_runs
         )
@@ -508,9 +441,8 @@ def main() -> None:
     print(summary.to_string(index=False))
 
     best = _pick_best_k(results)
-    diag = "2D scatter + boxplot" if len(FEATURES) == 2 else "PCA + boxplot"
     print(
-        f"\nValt k för {diag}/detaljer: k = {best.k} "
+        f"\nValt k för figurer + stabilitetsheuristik: k = {best.k} "
         f"(mean_silhouette={best.mean_silhouette:.6f}, MSE={best.mse_drift:.8f}, max_size_std={best.max_size_std:.4f})"
     )
 
