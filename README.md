@@ -1,53 +1,111 @@
-# Thesis work spring 2026
+# Thesis Work Spring 2026
 
-Machine learning study on student absence patterns. The goal is to classify
-students at risk of recurring absence using anonymized school data and compare
-model performance.
+Detta projekt analyserar elevfrånvaro med en EDM-pipeline i tre steg:
 
-## Project structure
+1. `preprocess.py`: rå lektionsdata -> elevfeatures
+2. `train_kmeans.py`: KMeans-klustring på beteendefeatures
+3. `test_kmeans_stability.py`: stabilitetsanalys över flera seeds och k-värden
 
-- `src/`: Python package for the project
-- `src/data/`: data loading, cleaning, and feature preparation
-- `src/models/`: model files (Decision Tree, Random Forest, Gradient Boosted Trees/XGBoost, Naive Bayes)
-- `src/eval/`: evaluation metrics and result formatting
-- `scripts/`: one-off analysis scripts (e.g., inspecting parquet files)
-- `data/raw/`: raw datasets (not tracked in git)
-- `data/processed/`: derived datasets (not tracked in git)
+## Projektstruktur
 
-## Dataset
+```text
+thesis-work-spring-26/
+├── data/
+│   ├── raw/
+│   └── processed/
+├── output/
+│   ├── metrics/
+│   └── plots/
+├── scripts/
+│   └── run_project.sh
+├── src/
+│   ├── project_paths.py
+│   ├── preprocess.py
+│   ├── train_kmeans.py
+│   └── test_kmeans_stability.py
+└── requirements.txt
+```
 
-Place the parquet file in `data/raw/` (e.g., `data/raw/lyckeboskolan_absence_ht2025.parquet`).
-Large/sensitive data is excluded via `.gitignore`.
+## Data och standardvägar
 
+Standard-infil:
+
+- `data/raw/lyckeboskolan_absence_lasaret2425_v6.parquet`
+
+Viktiga standard-utdata:
+
+- `data/processed/student_features.parquet`
+- `data/processed/clustered_students.parquet`
+- `data/processed/cluster_summary.md`
+- `output/plots/stability_test_pca_k*.png`
+- `output/plots/feature_distributions_k*.png`
+
+Alla standardvägar hanteras i `src/project_paths.py`.
 
 ## Setup
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
+python3 -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Dependencies include `pandas`, `scikit-learn`, `xgboost`, and `seaborn` for plotting.
-
-## Run
+## Kör hela pipelinen
 
 ```bash
-python -m src.main
+chmod +x scripts/run_project.sh   # första gången
+./scripts/run_project.sh
 ```
 
-For comparison between clustering with vs without absence features on the full
-grouped student dataset:
+Miljövariabler som kan sättas vid körning:
+
+- `PARQUET`: full sökväg till rå parquet (om annan än standard)
+- `MIN_LESSONS`: minsta antal rapporterade lektioner per elev i samtliga steg
+- `K`: antal kluster i `train_kmeans.py`
+
+Exempel:
 
 ```bash
-python -m src.main_compare_absence
+PARQUET="/full/path/my_data.parquet" MIN_LESSONS=180 K=3 ./scripts/run_project.sh
 ```
 
-## Baseline analysis
-
-Use the quick inspection script to get a first overview of the dataset:
+## Kör stegen manuellt
 
 ```bash
-python scripts/inspect_parquet.py
+python3 src/preprocess.py --min-reported-lessons 180
+python3 src/train_kmeans.py --k 3 --min-lessons 180
+python3 src/test_kmeans_stability.py --min-lessons 180 --k-list 3,4,5
 ```
+
+## Features för klustring
+
+`train_kmeans.py` klustrar på följande kolumner från `student_features.parquet`:
+
+- `morning_absence`
+- `afternoon_absence`
+- `subject_variance`
+- `punctuality_score`
+- `trend_score`
+- `fragmentation_index`
+- `weekday_variance`
+
+Volymmåttet `reserved_absence_minutes_total` används som validering/tolkning, inte som indata till KMeans.
+
+## Vad skripten gör
+
+- `src/preprocess.py`
+: Filtrerar till `report_status == REPORTED`, exkluderar elever med för få rapporterade lektioner, och bygger elevfeatures.
+
+- `src/train_kmeans.py`
+: Läser `student_features.parquet`, skalar features, kör KMeans, beräknar silhouette och sparar kluster-resultat som Parquet.
+
+- `src/test_kmeans_stability.py`
+: Kör flera KMeans-runs med olika seeds, alignerar kluster mellan runs och sparar stabilitetsfigurer.
+
+## Tips
+
+- Kör alltid kommandon från projektroten.
+- Om inga elever återstår efter filtrering: sänk `--min-reported-lessons` / `--min-lessons`.
+- Kontrollera att råfilen finns på rätt plats innan körning.
 

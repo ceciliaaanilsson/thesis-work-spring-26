@@ -346,7 +346,7 @@ def main() -> None:
             "eller:\n"
             f"  python3 src/preprocess.py --input /sökväg/din_fil.parquet\n"
         )
-    df = pd.read_parquet(inp, engine="pyarrow")
+    df = pd.read_parquet(inp)
     result, stats = build_student_features(
         df, min_reported_lessons=args.min_reported_lessons
     )
