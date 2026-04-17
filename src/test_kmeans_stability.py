@@ -35,6 +35,49 @@ SIZE_STD_FRAC = 0.05
 DRIFT_MSE_THRESHOLD = 0.05
 DEFAULT_K_LIST = (3, 4, 5)
 
+_FEATURE_LABELS_SV: dict[str, str] = {
+    "morning_absence": "Frånvaro (morgon)",
+    "afternoon_absence": "Frånvaro (eftermiddag)",
+    "subject_variance": "Ämnesvarians",
+    "punctuality_score": "Punktlighet",
+    "trend_score": "Trend",
+    "fragmentation_index": "Fragmentering",
+    "weekday_variance": "Veckodagsvarians",
+}
+
+
+def _pretty_feature_name(feat: str) -> str:
+    return _FEATURE_LABELS_SV.get(feat, feat)
+
+
+def _pc_axis_label(pc_name: str, features: list[str], loadings: np.ndarray) -> str:
+    """
+    Bygg en pedagogisk axel-etikett som speglar forskningsfrågorna.
+
+    - PC1: om dominerande variabler inkluderar morgon- eller eftermiddagsfrånvaro,
+      använd "PC1 (Frånvarovolym & Ämnesvarians)".
+    - PC2: använd "PC2 (Frånvarostruktur: Fragmentering & Punktlighet)".
+
+    I övriga fall faller vi tillbaka på topp-2 features baserat på |loading|.
+    """
+    if loadings.size == 0 or len(features) == 0:
+        return pc_name
+
+    order = np.argsort(np.abs(loadings))[::-1]
+    top = [features[int(j)] for j in order[: min(2, len(order))]]
+
+    if pc_name == "PC2":
+        return "PC2 (Frånvarostruktur: Fragmentering & Punktlighet)"
+
+    if pc_name == "PC1" and any(
+        f in {"morning_absence", "afternoon_absence"} for f in top
+    ):
+        return "PC1 (Frånvarovolym & Ämnesvarians)"
+
+    desc = " & ".join(_pretty_feature_name(f) for f in top)
+
+    return f"{pc_name} ({desc})"
+
 
 @dataclass
 class StabilityRunResult:
@@ -152,6 +195,117 @@ def _save_feature_boxplots(
 
 def _output_with_k(path: Path, k: int) -> Path:
     return path.with_name(f"{path.stem}_k{k}{path.suffix}")
+
+
+def _stability_pca_path(base: Path, k: int) -> Path:
+    """Spara som stability_pca_k{k}.png i samma katalog som base."""
+    return base.with_name(f"stability_pca_k{k}.png")
+
+
+def _boxplot_path(base: Path, k: int) -> Path:
+    """Spara som feature_distributions_k{k}.png i samma katalog som base."""
+    return base.with_name(f"feature_distributions_k{k}.png")
+
+
+def _save_figures_for_k(
+    res: StabilityRunResult,
+    df: pd.DataFrame,
+    X_scaled: np.ndarray,
+    scaler: StandardScaler,
+    random_state_extra: int,
+    pca_path: Path,
+    boxplot_path: Path,
+) -> None:
+    """Spara PCA/2D-figur + boxplot för ett specifikt k (inga terminalutskrifter)."""
+    k = res.k
+    labels_final = res.aligned_labels_list[-1]
+
+    _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
+
+    if len(FEATURES) == 2:
+        x_feat, y_feat = FEATURES[0], FEATURES[1]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 10))
+        for ax, run_idx, seed in zip(axes.ravel(), range(len(SEEDS)), SEEDS):
+            sil = float(
+                silhouette_score(
+                    X_scaled,
+                    res.aligned_labels_list[run_idx],
+                    random_state=random_state_extra,
+                )
+            )
+            plot_2d_analysis(
+                df,
+                x_feat,
+                y_feat,
+                res.aligned_labels_list[run_idx],
+                out_path=None,
+                title=f"Run {run_idx + 1} (seed={seed})  Silhouette={sil:.3f}",
+                ax=ax,
+            )
+        plt.suptitle(
+            f"Rå 2D (k={k}) — färg = alignerat kluster-id — OLS + Spearman i panel",
+            y=1.02,
+        )
+        plt.tight_layout()
+        pca_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(pca_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        return
+
+    pca = PCA(n_components=2, random_state=random_state_extra)
+    X_pca = pca.fit_transform(X_scaled)
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i % 10) for i in range(k)]
+    handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=colors[c],
+            markersize=7,
+            label=f"{c}",
+        )
+        for c in range(k)
+    ]
+    pc1_label = _pc_axis_label("PC1", FEATURES, np.asarray(pca.components_[0], dtype=float))
+    pc2_label = _pc_axis_label("PC2", FEATURES, np.asarray(pca.components_[1], dtype=float))
+    for ax, run_idx, seed in zip(axes.ravel(), range(len(SEEDS)), SEEDS):
+        sil = silhouette_score(
+            X_scaled,
+            res.aligned_labels_list[run_idx],
+            random_state=random_state_extra,
+        )
+        lbls = np.asarray(res.aligned_labels_list[run_idx], dtype=int)
+        point_colors = [colors[int(c)] for c in lbls]
+        ax.scatter(
+            X_pca[:, 0],
+            X_pca[:, 1],
+            c=point_colors,
+            alpha=0.65,
+            s=12,
+        )
+        ax.set_xlabel(pc1_label)
+        ax.set_ylabel(pc2_label)
+        ax.set_title(f"Run {run_idx + 1} (seed={seed})\nSilhouette={sil:.3f}")
+        ax.grid(True, alpha=0.3)
+    plt.suptitle(
+        f"PCA (k={k}) — osynliga beteendemönster i 2D — färg = alignerat kluster-id",
+        y=1.02,
+    )
+    fig.legend(
+        handles=handles,
+        title="cluster_id",
+        loc="lower center",
+        ncol=min(k, 8),
+        frameon=False,
+    )
+    plt.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
+    pca_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(pca_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 def run_stability_for_k(
@@ -304,29 +458,53 @@ def _print_best_k_full(
         X_pca = pca.fit_transform(X_scaled)
 
         fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+        cmap = plt.get_cmap("tab10")
+        colors = [cmap(i % 10) for i in range(k)]
+        handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor=colors[c],
+                markersize=7,
+                label=f"{c}",
+            )
+            for c in range(k)
+        ]
+        pc1_label = _pc_axis_label("PC1", FEATURES, np.asarray(pca.components_[0], dtype=float))
+        pc2_label = _pc_axis_label("PC2", FEATURES, np.asarray(pca.components_[1], dtype=float))
         for ax, run_idx, seed in zip(axes.ravel(), range(len(SEEDS)), SEEDS):
             sil = silhouette_score(
                 X_scaled,
                 res.aligned_labels_list[run_idx],
                 random_state=random_state_extra,
             )
+            lbls = np.asarray(res.aligned_labels_list[run_idx], dtype=int)
+            point_colors = [colors[int(c)] for c in lbls]
             ax.scatter(
                 X_pca[:, 0],
                 X_pca[:, 1],
-                c=res.aligned_labels_list[run_idx],
-                cmap="viridis",
+                c=point_colors,
                 alpha=0.65,
                 s=12,
             )
-            ax.set_xlabel("PC1")
-            ax.set_ylabel("PC2")
+            ax.set_xlabel(pc1_label)
+            ax.set_ylabel(pc2_label)
             ax.set_title(f"Run {run_idx + 1} (seed={seed})\nSilhouette={sil:.3f}")
             ax.grid(True, alpha=0.3)
         plt.suptitle(
             f"PCA (k={k}) — osynliga beteendemönster i 2D — färg = alignerat kluster-id",
             y=1.02,
         )
-        plt.tight_layout()
+        fig.legend(
+            handles=handles,
+            title="cluster_id",
+            loc="lower center",
+            ncol=min(k, 8),
+            frameon=False,
+        )
+        plt.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
         pca_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(pca_path, dpi=150, bbox_inches="tight")
         plt.close()
@@ -417,6 +595,9 @@ def main() -> None:
 
     results: list[StabilityRunResult] = []
     for k in k_list:
+        print(
+            f"\nTestar stabilitet för k={k} över {len(SEEDS)} oberoende körningar (seeds={SEEDS})..."
+        )
         verbose_runs = False
         res = run_stability_for_k(
             k, df, X_scaled, scaler, args.random_state_extra, verbose_runs
@@ -446,8 +627,23 @@ def main() -> None:
         f"(mean_silhouette={best.mean_silhouette:.6f}, MSE={best.mse_drift:.8f}, max_size_std={best.max_size_std:.4f})"
     )
 
-    pca_path = _output_with_k(args.output_figure, best.k)
-    box_path = _output_with_k(args.output_boxplot, best.k)
+    # Spara figurer för ALLA k i listan (inte bara bästa).
+    for res in results:
+        pca_path_k = _stability_pca_path(args.output_figure, res.k)
+        box_path_k = _boxplot_path(args.output_boxplot, res.k)
+        _save_figures_for_k(
+            res,
+            df,
+            X_scaled,
+            scaler,
+            args.random_state_extra,
+            pca_path_k,
+            box_path_k,
+        )
+
+    # Stabilitetsheuristik körs för valt k (terminalen hålls fokuserad).
+    pca_path = _stability_pca_path(args.output_figure, best.k)
+    box_path = _boxplot_path(args.output_boxplot, best.k)
     _print_best_k_full(
         best,
         df,
