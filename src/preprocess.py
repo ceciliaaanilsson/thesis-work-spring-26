@@ -299,6 +299,8 @@ def build_student_features(
     out.index.name = id_col
     out = out.reset_index()
 
+    out.loc[:, CLUSTERING_FEATURES] = out.loc[:, CLUSTERING_FEATURES].fillna(0.0)
+
     stats = {
         "rows_dropped_unreported": rows_dropped_unreported,
         "students_after_reported": n_students_after_reported,
