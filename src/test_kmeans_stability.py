@@ -207,6 +207,34 @@ def _boxplot_path(base: Path, k: int) -> Path:
     return base.with_name(f"feature_distributions_k{k}.png")
 
 
+def _invalid_ratio_by_cluster_path(base: Path, k: int) -> Path:
+    """Spara som invalid_ratio_by_cluster_k{k}.png i samma katalog som base."""
+    return base.with_name(f"invalid_ratio_by_cluster_k{k}.png")
+
+
+def _save_invalid_ratio_by_cluster(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    out_path: Path,
+    k: int,
+) -> None:
+    """Boxplot av administrativ invalid_ratio per kluster (validering mot beteendeprofiler)."""
+    if "invalid_ratio" not in df.columns:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    data = [
+        np.asarray(df.loc[labels == c, "invalid_ratio"], dtype=float) for c in range(k)
+    ]
+    ax.boxplot(data, tick_labels=[f"C{c}" for c in range(k)])
+    ax.set_ylabel("invalid_ratio (INVALID-minuter / total frånvaro)")
+    ax.set_title(f"invalid_ratio per kluster (k={k})")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def _save_figures_for_k(
     res: StabilityRunResult,
     df: pd.DataFrame,
@@ -221,6 +249,12 @@ def _save_figures_for_k(
     labels_final = res.aligned_labels_list[-1]
 
     _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
+    _save_invalid_ratio_by_cluster(
+        df,
+        labels_final,
+        _invalid_ratio_by_cluster_path(boxplot_path, k),
+        k,
+    )
 
     if len(FEATURES) == 2:
         x_feat, y_feat = FEATURES[0], FEATURES[1]
@@ -421,9 +455,14 @@ def _print_best_k_full(
 ) -> None:
     k = res.k
     labels_final = res.aligned_labels_list[-1]
-    centroids_final = res.aligned_centroids_list[-1]
 
     _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
+    _save_invalid_ratio_by_cluster(
+        df,
+        labels_final,
+        _invalid_ratio_by_cluster_path(boxplot_path, k),
+        k,
+    )
 
     if len(FEATURES) == 2:
         x_feat, y_feat = FEATURES[0], FEATURES[1]

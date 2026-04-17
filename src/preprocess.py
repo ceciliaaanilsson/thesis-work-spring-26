@@ -3,6 +3,14 @@
 Aggregera lektionsrader till elevnivå för EDM / klustring.
 
 Endast rader med report_status == REPORTED används (UNREPORTED slängs).
+
+Administrativa etiketter (absence_type) vs orsak (cause_ext):
+- VALID: befogad frånvaro i systemet; många rader har cause_ext NOCAUSE men är ändå VALID.
+- INVALID: ogiltig/obefogad frånvaro (administrativ ”skolk”).
+- invalid_ratio (validerings-/etikettvariabel, ej i CLUSTERING_FEATURES): andel INVALID-minuter
+  bland rader med is_true_absence, relativt total absence_minutes_total per elev; 0.0 om total
+  frånvaro är 0.
+
 Frånvaro för beteendefeatures definieras som is_true_absence: present == 0 och
 cause_ext inte i (OTHERACTIVITY, WORKBASEDLEARNING) — sanktionerad närvaro räknas inte som frånvaro.
 
@@ -44,7 +52,7 @@ MORNING_CUTOFF_MIN = 9 * 60
 AFTERNOON_CUTOFF_MIN = 13 * 60
 
 SANCTIONED_CAUSES = frozenset({"OTHERACTIVITY", "WORKBASEDLEARNING"})
-NOCAUSE_VALUE = "NOCAUSE"
+KNOWN_ABSENCE_TYPES_FOR_GLOBALS = frozenset({"VALID", "INVALID", "NONE"})
 
 DEFAULT_FULL_DAY_THRESHOLD = 0.9
 DEFAULT_FRAGMENTATION_MIN_ABSENCE_DAYS = 3
@@ -79,6 +87,15 @@ def _weekday_variance_from_rates(rates: pd.Series) -> float:
     if len(rates) <= 1:
         return 0.0
     return float(rates.var(ddof=1))
+
+
+def _normalize_absence_type(series: pd.Series) -> pd.Series:
+    """
+    Normalisera absence_type till versaler; saknat/tom/'nan' → MISSING (för logg/invalid_ratio).
+    """
+    upper = series.astype(str).str.strip().str.upper()
+    upper = upper.replace({"NAN": ""})
+    return upper.mask(series.isna() | (upper == ""), "MISSING")
 
 
 def _term_reporting_filter_stats(
@@ -208,6 +225,9 @@ def build_student_features(
             "students_excluded_low_reporting_ht": students_excluded_low_ht,
             "students_excluded_low_reporting_vt": students_excluded_low_vt,
             "reporting_rate_threshold": reporting_rate_threshold,
+            "global_minutes_valid": 0.0,
+            "global_minutes_invalid": 0.0,
+            "global_minutes_other_or_missing": 0.0,
             "students_in_output": 0,
         }
         return pd.DataFrame(), stats
@@ -236,6 +256,14 @@ def build_student_features(
 
     df["_true_absence_minutes"] = np.where(
         df["is_true_absence"], df["absence_minutes_total"].to_numpy(), 0.0
+    )
+
+    abs_num = pd.to_numeric(df["absence_minutes_total"], errors="coerce").fillna(0.0)
+    at_norm = _normalize_absence_type(df["absence_type"])
+    global_minutes_valid = float(abs_num[at_norm == "VALID"].sum())
+    global_minutes_invalid = float(abs_num[at_norm == "INVALID"].sum())
+    global_minutes_other_or_missing = float(
+        abs_num[~at_norm.isin(KNOWN_ABSENCE_TYPES_FOR_GLOBALS)].sum()
     )
 
     ids = df[id_col].unique()
@@ -284,41 +312,25 @@ def build_student_features(
     rate_vt = np.where(vt_sched > 0, vt_abs / vt_sched, 0.0)
     trend_score = pd.Series(rate_vt - rate_ht, index=ids)
 
-    # invalid_ratio: ogiltiga minuter / total absence_minutes_total, klippt till [0, 1].
-    # Per rad: undvik dubbelräkning (invalid_absence_minutes + NOCAUSE på samma rad).
-    # NaN i invalid_absence_minutes behandlas som 0.
-    if "invalid_absence_minutes" not in df.columns:
-        raise ValueError("Saknad kolumn: invalid_absence_minutes (krävs för invalid_ratio)")
-
-    inv_abs = pd.to_numeric(df["invalid_absence_minutes"], errors="coerce").fillna(0.0).to_numpy(
-        dtype=np.float64
-    )
-    abs_row = pd.to_numeric(df["absence_minutes_total"], errors="coerce").fillna(0.0).to_numpy(
-        dtype=np.float64
-    )
-    is_nocause_abs = (
-        df["present"].eq(0) & df["cause_ext"].astype(str).eq(NOCAUSE_VALUE)
-    ).to_numpy()
-    # NOCAUSE (frånvaro): hela radens frånvaro räknas som ogiltig; annars kolumnen invalid_absence_minutes.
-    row_invalid_like = np.maximum(inv_abs, np.where(is_nocause_abs, abs_row, 0.0))
-    row_invalid_like = np.minimum(row_invalid_like, abs_row)
-    df["_row_invalid_like"] = row_invalid_like
-
-    invalid_numer = df.groupby(id_col)["_row_invalid_like"].sum().reindex(ids, fill_value=0.0)
-    total_abs_min = (
-        pd.to_numeric(df["absence_minutes_total"], errors="coerce")
-        .fillna(0.0)
+    # invalid_ratio: administrativ INVALID / total frånvarominuter per elev; klippt [0, 1].
+    # Täljare: absence_minutes_total på rader med is_true_absence och absence_type == INVALID.
+    # Nämnare 0 ⇒ invalid_ratio 0.0 (ingen NaN i korrelationsanalyser).
+    is_inv_true = df["is_true_absence"].to_numpy() & (at_norm == "INVALID").to_numpy()
+    invalid_row_minutes = np.where(is_inv_true, abs_num.to_numpy(dtype=float), 0.0)
+    invalid_minutes_sum = (
+        pd.Series(invalid_row_minutes, index=df.index)
         .groupby(df[id_col])
         .sum()
         .reindex(ids, fill_value=0.0)
     )
+    total_abs_min = abs_num.groupby(df[id_col]).sum().reindex(ids, fill_value=0.0)
     denom_ok = total_abs_min.to_numpy(dtype=float) > 0
     ratio_raw = np.zeros(len(ids), dtype=float)
     ratio_raw[denom_ok] = (
-        invalid_numer.to_numpy(dtype=float)[denom_ok] / total_abs_min.to_numpy(dtype=float)[denom_ok]
+        invalid_minutes_sum.to_numpy(dtype=float)[denom_ok]
+        / total_abs_min.to_numpy(dtype=float)[denom_ok]
     )
     invalid_ratio = pd.Series(np.clip(ratio_raw, 0.0, 1.0), index=ids, name="invalid_ratio")
-    df.drop(columns=["_row_invalid_like"], inplace=True, errors="ignore")
 
     # fragmentation_index: partial-day vs full-day på dagsnivå (elev+datum).
     day = (
@@ -418,6 +430,9 @@ def build_student_features(
         "students_excluded_low_reporting_ht": students_excluded_low_ht,
         "students_excluded_low_reporting_vt": students_excluded_low_vt,
         "reporting_rate_threshold": reporting_rate_threshold,
+        "global_minutes_valid": global_minutes_valid,
+        "global_minutes_invalid": global_minutes_invalid,
+        "global_minutes_other_or_missing": global_minutes_other_or_missing,
         "students_in_output": len(out),
     }
     return out, stats
@@ -500,6 +515,19 @@ def main() -> None:
         f"     Elever kvar efter terminsfilter + REPORTED: "
         f"{stats['students_after_reported']}"
     )
+    gv = stats.get("global_minutes_valid", 0.0)
+    gi = stats.get("global_minutes_invalid", 0.0)
+    go = stats.get("global_minutes_other_or_missing", 0.0)
+    gtot = gv + gi + go
+    print()
+    print(
+        "     Frånvarominuter (globalt, REPORTED-kohort): "
+        f"VALID={gv:,.0f}  INVALID={gi:,.0f}  Övrigt/Saknat={go:,.0f}"
+    )
+    if gtot > 0:
+        print(
+            f"     Andel INVALID av (VALID+INVALID+Övrigt): {100.0 * gi / gtot:.2f}%"
+        )
     print()
 
 

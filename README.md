@@ -15,9 +15,11 @@ thesis-work-spring-26/
 │   └── processed/
 ├── output/
 │   ├── metrics/
-│   └── plots/
+│   ├── plots/
+│   └── tables/
 ├── scripts/
-│   └── run_project.sh
+│   ├── run_project.sh
+│   └── cluster_feature_means.py
 ├── src/
 │   ├── project_paths.py
 │   ├── preprocess.py
@@ -39,6 +41,7 @@ Viktiga standard-utdata:
 - `data/processed/cluster_summary.md`
 - `output/plots/stability_test_pca_k*.png`
 - `output/plots/feature_distributions_k*.png`
+- `output/tables/cluster_feature_means.md` (efter `cluster_feature_means.py`)
 
 Alla standardvägar hanteras i `src/project_paths.py`.
 
@@ -57,6 +60,15 @@ pip install -r requirements.txt
 chmod +x scripts/run_project.sh   # första gången
 ./scripts/run_project.sh
 ```
+
+Efter att `clustered_students.parquet` finns kan du generera en **Markdown-tabell med medelvärden per kluster** (alla KMeans-features, `invalid_ratio` och `reserved_absence_minutes_total`):
+
+```bash
+source .venv/bin/activate   # om du inte redan är i venv
+python scripts/cluster_feature_means.py
+```
+
+Standard: läser `data/processed/clustered_students.parquet` och skriver till `output/tables/cluster_feature_means.md`. Egna sökvägar: `python scripts/cluster_feature_means.py --help`.
 
 Miljövariabler som kan sättas vid körning:
 
