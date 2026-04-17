@@ -548,7 +548,7 @@ def main() -> None:
         "--min-lessons",
         type=int,
         default=100,
-        help="Ska matcha preprocess (min reported lessons; default 100)",
+        help="Minsta summa reserved_absence_type_* (train_kmeans.load_and_clean); default 100",
     )
     p.add_argument(
         "--output-figure",

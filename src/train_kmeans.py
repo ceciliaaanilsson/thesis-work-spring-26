@@ -87,62 +87,6 @@ def load_and_clean(
     return df, dropped
 
 
-def plot_cluster_demographics(
-    df: pd.DataFrame,
-    *,
-    out_path: Path,
-    cluster_col: str = "cluster_id",
-    grade_col: str = "grade",
-    gender_col: str = "gender",
-) -> None:
-    """
-    Valideringsfigur: visar om beteendearketyper (kluster) är överrepresenterade
-    i vissa årskurser eller könskategorier.
-
-    Vi plottar P(cluster | grupp), dvs. normaliserar per grade respektive per gender
-    så att varje stapel summerar till 1.0 inom gruppen.
-    """
-    need = {cluster_col, grade_col, gender_col}
-    missing = [c for c in need if c not in df.columns]
-    if missing:
-        raise ValueError(f"Saknade kolumner för demografiplott: {missing}")
-
-    ct_grade = pd.crosstab(df[grade_col], df[cluster_col], normalize="index").sort_index()
-    ct_gender = pd.crosstab(df[gender_col], df[cluster_col], normalize="index").sort_index()
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    ct_grade.plot(kind="bar", stacked=True, ax=axes[0], colormap="tab10")
-    axes[0].set_title("Cluster-fördelning per grade (normaliserat)")
-    axes[0].set_xlabel("grade")
-    axes[0].set_ylabel("andel")
-    axes[0].grid(True, axis="y", alpha=0.3)
-
-    ct_gender.plot(kind="bar", stacked=True, ax=axes[1], colormap="tab10")
-    axes[1].set_title("Cluster-fördelning per gender (normaliserat)")
-    axes[1].set_xlabel("gender")
-    axes[1].set_ylabel("andel")
-    axes[1].grid(True, axis="y", alpha=0.3)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        title="cluster_id",
-        loc="lower center",
-        ncol=min(len(labels), 8),
-        frameon=False,
-    )
-    for ax in axes:
-        leg = ax.get_legend()
-        if leg is not None:
-            leg.remove()
-
-    plt.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-
-
 def plot_2d_analysis(
     df: pd.DataFrame,
     x_feat: str,

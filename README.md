@@ -73,7 +73,7 @@ PARQUET="/full/path/my_data.parquet" MIN_LESSONS=180 K=3 ./scripts/run_project.s
 ## Kör stegen manuellt
 
 ```bash
-python3 src/preprocess.py --min-reported-lessons 180
+python3 src/preprocess.py --reporting-rate-threshold 0.5
 python3 src/train_kmeans.py --k 3 --min-lessons 180
 python3 src/test_kmeans_stability.py --min-lessons 180 --k-list 3,4,5
 ```
@@ -95,7 +95,7 @@ Volymmåttet `reserved_absence_minutes_total` används som validering/tolkning, 
 ## Vad skripten gör
 
 - `src/preprocess.py`
-: Filtrerar till `report_status == REPORTED`, exkluderar elever med för få rapporterade lektioner, och bygger elevfeatures.
+: Filtrerar elever med terminsvis rapporteringsgrad (HT/VT), sedan till `report_status == REPORTED`, och bygger elevfeatures.
 
 - `src/train_kmeans.py`
 : Läser `student_features.parquet`, skalar features, kör KMeans, beräknar silhouette och sparar kluster-resultat som Parquet.
@@ -106,6 +106,6 @@ Volymmåttet `reserved_absence_minutes_total` används som validering/tolkning, 
 ## Tips
 
 - Kör alltid kommandon från projektroten.
-- Om inga elever återstår efter filtrering: sänk `--min-reported-lessons` / `--min-lessons`.
+- Om inga elever återstår efter filtrering: sänk `--reporting-rate-threshold` och/eller `--min-lessons` (train/stability).
 - Kontrollera att råfilen finns på rätt plats innan körning.
 

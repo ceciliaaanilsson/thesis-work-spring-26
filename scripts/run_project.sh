@@ -13,7 +13,7 @@ K_TEST_LIST="3,4,5"           # Används för stabilitetstesterna (steg 3)
 
 mkdir -p data/raw data/processed output/plots
 
-PRE_ARGS=(--min-reported-lessons "$MIN_LESSONS")
+PRE_ARGS=()
 if [[ -n "${PARQUET:-}" ]]; then
   PRE_ARGS+=(--input "$PARQUET")
 fi

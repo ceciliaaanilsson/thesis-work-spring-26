@@ -6,7 +6,8 @@ Endast rader med report_status == REPORTED används (UNREPORTED slängs).
 Frånvaro för beteendefeatures definieras som is_true_absence: present == 0 och
 cause_ext inte i (OTHERACTIVITY, WORKBASEDLEARNING) — sanktionerad närvaro räknas inte som frånvaro.
 
-Elever med färre än min_reported_lessons rapporterade lektioner under året exkluderas.
+Elever exkluderas om rapporteringsgraden (REPORTED / schemalagda lektioner med schema_minutes > 0)
+per termin understiger en tröskel i HT eller VT, eller om en termin saknas helt (se build_student_features).
 
 Features för klustring listas i CLUSTERING_FEATURES (övriga kolumner är metadata eller reserverade).
 
@@ -45,9 +46,9 @@ AFTERNOON_CUTOFF_MIN = 13 * 60
 SANCTIONED_CAUSES = frozenset({"OTHERACTIVITY", "WORKBASEDLEARNING"})
 NOCAUSE_VALUE = "NOCAUSE"
 
-DEFAULT_MIN_REPORTED_LESSONS = 100
 DEFAULT_FULL_DAY_THRESHOLD = 0.9
 DEFAULT_FRAGMENTATION_MIN_ABSENCE_DAYS = 3
+DEFAULT_REPORTING_RATE_THRESHOLD = 0.5
 
 
 def _minutes_since_midnight_local(series_local: pd.Series) -> pd.Series:
@@ -80,34 +81,141 @@ def _weekday_variance_from_rates(rates: pd.Series) -> float:
     return float(rates.var(ddof=1))
 
 
+def _term_reporting_filter_stats(
+    df: pd.DataFrame,
+    id_col: str,
+    reporting_rate_threshold: float,
+) -> tuple[np.ndarray, int, int, int]:
+    """
+    Beräkna vilka elever som klarar terminsvis rapporteringsgrad.
+
+    Exkludera om HT eller VT saknas (inga schemalagda rader med schema_minutes > 0),
+    eller om rate < threshold i någon termin. NaN i rate efter pivot = saknad termin.
+
+    Bortfallsorsak per elev (disjunkt, prioritet): (1) saknad termin, (2) låg HT, (3) låg VT.
+    Returnerar (eligible_mask på df[id_col].unique(), Z, X, Y).
+    """
+    sched = pd.to_numeric(df["schema_minutes"], errors="coerce").fillna(0.0)
+    df_s = df.loc[sched > 0].copy()
+    all_ids = df[id_col].unique()
+    if df_s.empty:
+        # Inga schemalagda lektioner: saknad termin för alla med rader i df.
+        return np.zeros(len(all_ids), dtype=bool), int(len(all_ids)), 0, 0
+
+    n_sched = df_s.groupby([id_col, "termin"]).size()
+    n_rep = (
+        df_s.loc[df_s["report_status"].astype(str).eq("REPORTED")]
+        .groupby([id_col, "termin"])
+        .size()
+    )
+
+    all_ids = df[id_col].unique()
+    n_sched_wide = n_sched.unstack(fill_value=0)
+    for c in ("HT", "VT"):
+        if c not in n_sched_wide.columns:
+            n_sched_wide[c] = 0
+    n_sched_wide = n_sched_wide.reindex(all_ids, fill_value=0)
+
+    n_rep_wide = n_rep.unstack(fill_value=0)
+    for c in ("HT", "VT"):
+        if c not in n_rep_wide.columns:
+            n_rep_wide[c] = 0
+    n_rep_wide = n_rep_wide.reindex(all_ids, fill_value=0)
+
+    n_ht = n_sched_wide["HT"].to_numpy(dtype=float)
+    n_vt = n_sched_wide["VT"].to_numpy(dtype=float)
+    rep_ht = n_rep_wide["HT"].to_numpy(dtype=float)
+    rep_vt = n_rep_wide["VT"].to_numpy(dtype=float)
+
+    missing_term = (n_ht == 0) | (n_vt == 0)
+    # Undvik division med noll: np.where utvärderar båda grenarna och ger RuntimeWarning.
+    rate_ht = np.full(n_ht.shape, np.nan, dtype=float)
+    rate_vt = np.full(n_vt.shape, np.nan, dtype=float)
+    mask_ht = n_ht > 0
+    mask_vt = n_vt > 0
+    rate_ht[mask_ht] = rep_ht[mask_ht] / n_ht[mask_ht]
+    rate_vt[mask_vt] = rep_vt[mask_vt] / n_vt[mask_vt]
+
+    thr = reporting_rate_threshold
+    eligible_mask = (
+        ~missing_term
+        & np.isfinite(rate_ht)
+        & np.isfinite(rate_vt)
+        & (rate_ht >= thr)
+        & (rate_vt >= thr)
+    )
+
+    # Disjunkt: (1) saknad termin, (2) låg HT, (3) låg VT.
+    z_count = x_count = y_count = 0
+    for i in range(len(all_ids)):
+        if eligible_mask[i]:
+            continue
+        if missing_term[i]:
+            z_count += 1
+        elif rate_ht[i] < thr:
+            x_count += 1
+        elif rate_vt[i] < thr:
+            y_count += 1
+
+    return eligible_mask, z_count, x_count, y_count
+
+
 def build_student_features(
     df: pd.DataFrame,
-    min_reported_lessons: int = DEFAULT_MIN_REPORTED_LESSONS,
+    reporting_rate_threshold: float = DEFAULT_REPORTING_RATE_THRESHOLD,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     id_col = "anon_student_id"
-    n_rows_in = len(df)
 
     if "report_status" not in df.columns:
         raise ValueError("Saknad kolumn: report_status")
+    if "termin" not in df.columns:
+        raise ValueError("Saknad kolumn: termin")
+    if "schema_minutes" not in df.columns:
+        raise ValueError("Saknad kolumn: schema_minutes")
+    if "absence_minutes_total" not in df.columns:
+        raise ValueError("Saknad kolumn: absence_minutes_total")
 
-    df = df.loc[df["report_status"].astype(str).eq("REPORTED")].copy()
-    rows_dropped_unreported = n_rows_in - len(df)
-    n_students_after_reported = df[id_col].nunique()
+    # Säkerhetskontroller på rådata (innan terminsfilter och övrig aggregering).
+    n_before_dedup = len(df)
+    df = df.drop_duplicates()
+    rows_removed_duplicates = int(n_before_dedup - len(df))
 
-    lesson_counts = df.groupby(id_col).size()
-    eligible = lesson_counts[lesson_counts >= min_reported_lessons].index
-    n_students_excluded_threshold = int(n_students_after_reported - len(eligible))
-    df = df.loc[df[id_col].isin(eligible)].copy()
+    schema_m = pd.to_numeric(df["schema_minutes"], errors="coerce")
+    abs_m = pd.to_numeric(df["absence_minutes_total"], errors="coerce")
+    both_finite = schema_m.notna() & abs_m.notna()
+    abs_exceeds_schema = both_finite & (abs_m > schema_m)
+    rows_capped_absence_to_schema = int(abs_exceeds_schema.sum())
+    if rows_capped_absence_to_schema:
+        df = df.copy()
+        df.loc[abs_exceeds_schema, "absence_minutes_total"] = schema_m.loc[
+            abs_exceeds_schema
+        ].to_numpy(dtype=float)
+
+    eligible_mask, students_excluded_missing_term, students_excluded_low_ht, students_excluded_low_vt = (
+        _term_reporting_filter_stats(df, id_col, reporting_rate_threshold)
+    )
+    all_ids = df[id_col].unique()
+    eligible_ids = all_ids[eligible_mask]
+    df = df.loc[df[id_col].isin(eligible_ids)].copy()
 
     if df.empty:
         stats: dict[str, Any] = {
-            "rows_dropped_unreported": rows_dropped_unreported,
-            "students_after_reported": n_students_after_reported,
-            "students_excluded_low_lessons": n_students_excluded_threshold,
+            "rows_removed_duplicates": rows_removed_duplicates,
+            "rows_capped_absence_to_schema": rows_capped_absence_to_schema,
+            "rows_dropped_unreported": 0,
+            "students_after_reported": 0,
+            "students_excluded_missing_term": students_excluded_missing_term,
+            "students_excluded_low_reporting_ht": students_excluded_low_ht,
+            "students_excluded_low_reporting_vt": students_excluded_low_vt,
+            "reporting_rate_threshold": reporting_rate_threshold,
             "students_in_output": 0,
-            "min_reported_lessons": min_reported_lessons,
         }
         return pd.DataFrame(), stats
+
+    rows_before_reported = len(df)
+    df = df.loc[df["report_status"].astype(str).eq("REPORTED")].copy()
+    rows_dropped_unreported = rows_before_reported - len(df)
+    n_students_after_reported = df[id_col].nunique()
 
     if not pd.api.types.is_datetime64_any_dtype(df["lesson_start"]):
         df["lesson_start"] = pd.to_datetime(df["lesson_start"], utc=True)
@@ -302,11 +410,15 @@ def build_student_features(
     out.loc[:, CLUSTERING_FEATURES] = out.loc[:, CLUSTERING_FEATURES].fillna(0.0)
 
     stats = {
+        "rows_removed_duplicates": rows_removed_duplicates,
+        "rows_capped_absence_to_schema": rows_capped_absence_to_schema,
         "rows_dropped_unreported": rows_dropped_unreported,
         "students_after_reported": n_students_after_reported,
-        "students_excluded_low_lessons": n_students_excluded_threshold,
+        "students_excluded_missing_term": students_excluded_missing_term,
+        "students_excluded_low_reporting_ht": students_excluded_low_ht,
+        "students_excluded_low_reporting_vt": students_excluded_low_vt,
+        "reporting_rate_threshold": reporting_rate_threshold,
         "students_in_output": len(out),
-        "min_reported_lessons": min_reported_lessons,
     }
     return out, stats
 
@@ -328,10 +440,13 @@ def parse_args() -> argparse.Namespace:
         help="Sparas i data/processed/ (default student_features.parquet)",
     )
     p.add_argument(
-        "--min-reported-lessons",
-        type=int,
-        default=DEFAULT_MIN_REPORTED_LESSONS,
-        help=f"Minsta antal REPORTED-lektioner per elev (default {DEFAULT_MIN_REPORTED_LESSONS}).",
+        "--reporting-rate-threshold",
+        type=float,
+        default=DEFAULT_REPORTING_RATE_THRESHOLD,
+        help=(
+            "Minsta rapporteringsgrad per termin (HT och VT), "
+            f"andel REPORTED bland rader med schema_minutes > 0 (default {DEFAULT_REPORTING_RATE_THRESHOLD})."
+        ),
     )
     return p.parse_args()
 
@@ -350,7 +465,7 @@ def main() -> None:
         )
     df = pd.read_parquet(inp)
     result, stats = build_student_features(
-        df, min_reported_lessons=args.min_reported_lessons
+        df, reporting_rate_threshold=args.reporting_rate_threshold
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result.to_parquet(args.output, index=False)
@@ -360,13 +475,29 @@ def main() -> None:
     print(f"     Utdatafil: {args.output.resolve()}")
     print()
     print("  --- Datakvalitet (logg) ---")
-    print(f"     Rader borttagna (UNREPORTED): {stats['rows_dropped_unreported']}")
     print(
-        f"     Elever exkluderade (< {stats['min_reported_lessons']} rapporterade lektioner): "
-        f"{stats['students_excluded_low_lessons']}"
+        f"     Rader borttagna (exakta dubletter): {stats['rows_removed_duplicates']}"
     )
     print(
-        f"     Elever kvar efter REPORTED-filter (före tröskel): "
+        f"     Rader korrigerade (absence_minutes_total > schema_minutes → kapad): "
+        f"{stats['rows_capped_absence_to_schema']}"
+    )
+    pct = int(round(stats["reporting_rate_threshold"] * 100))
+    print(
+        f"     Elever exkluderade pga låg HT-rapportering (< {pct}%): "
+        f"{stats['students_excluded_low_reporting_ht']}"
+    )
+    print(
+        f"     Elever exkluderade pga låg VT-rapportering (< {pct}%): "
+        f"{stats['students_excluded_low_reporting_vt']}"
+    )
+    print(
+        f"     Elever exkluderade pga saknad termin: "
+        f"{stats['students_excluded_missing_term']}"
+    )
+    print(f"     Rader borttagna (UNREPORTED): {stats['rows_dropped_unreported']}")
+    print(
+        f"     Elever kvar efter terminsfilter + REPORTED: "
         f"{stats['students_after_reported']}"
     )
     print()
