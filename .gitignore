@@ -9,3 +9,5 @@ data/
 
 # Output files
 output/**
+
+*.csv

@@ -5,6 +5,7 @@ Detta projekt analyserar elevfrånvaro med en EDM-pipeline i tre steg:
 1. `preprocess.py`: rå lektionsdata -> elevfeatures
 2. `train_kmeans.py`: KMeans-klustring på beteendefeatures
 3. `test_kmeans_stability.py`: stabilitetsanalys över flera seeds och k-värden
+4. `analyze_bimonthly_risk.py`: bi-månatlig riskanalys kopplad till kluster
 
 ## Projektstruktur
 
@@ -19,6 +20,7 @@ thesis-work-spring-26/
 │   └── tables/
 ├── scripts/
 │   ├── run_project.sh
+│   ├── analyze_bimonthly_risk.py
 │   └── cluster_feature_means.py
 ├── src/
 │   ├── project_paths.py
@@ -69,6 +71,12 @@ python scripts/cluster_feature_means.py
 ```
 
 Standard: läser `data/processed/clustered_students.parquet` och skriver till `output/tables/cluster_feature_means.md`. Egna sökvägar: `python scripts/cluster_feature_means.py --help`.
+
+Bi-månatlig riskanalys (sparar CSV + Markdown):
+
+```bash
+python3 scripts/analyze_bimonthly_risk.py
+```
 
 Miljövariabler som kan sättas vid körning:
 
