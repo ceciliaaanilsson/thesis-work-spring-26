@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import random
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -21,6 +22,7 @@ from project_paths import (
     DEFAULT_CLUSTER_2D,
     DEFAULT_CLUSTERED_STUDENTS,
     DEFAULT_CLUSTER_SUMMARY,
+    DEFAULT_KMEANS_CENTROIDS,
     DEFAULT_STUDENT_FEATURES,
 )
 
@@ -176,6 +178,21 @@ def _to_markdown_table(df: pd.DataFrame) -> str:
     return "\n".join([header, sep, *rows]) + "\n"
 
 
+def _relabel_by_size(
+    labels: np.ndarray, centroids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
+    counts = pd.Series(labels).value_counts()
+    ordered = (
+        counts.sort_values(ascending=False, kind="stable")
+        .index.to_numpy(dtype=int)
+        .tolist()
+    )
+    mapping = {int(old): int(new) for new, old in enumerate(ordered)}
+    relabeled = np.array([mapping[int(x)] for x in labels], dtype=int)
+    reordered_centroids = centroids[ordered]
+    return relabeled, reordered_centroids, mapping
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="KMeans-klustring på student_features.parquet"
@@ -222,6 +239,12 @@ def main() -> None:
         default=DEFAULT_CLUSTER_2D,
         help="När exakt 2 features används: spara 2D scatter + OLS + Spearman (sätt tom för att hoppa över)",
     )
+    p.add_argument(
+        "--centroids-output",
+        type=Path,
+        default=DEFAULT_KMEANS_CENTROIDS,
+        help="CSV med klustercentroider i originalskala",
+    )
     args = p.parse_args()
 
     df, dropped_zero = load_and_clean(args.input, args.min_lessons)
@@ -243,12 +266,35 @@ def main() -> None:
     if n_clusters > len(df):
         raise SystemExit(f"--k ({n_clusters}) får inte överstiga antal elever ({len(df)}).")
 
-    final_km = KMeans(
-        n_clusters=n_clusters,
-        random_state=args.random_state,
-        n_init=10,
+    seeds = random.sample(range(1000), 4)
+    print(f"Random seeds (4 runs): {seeds}")
+
+    best_km: KMeans | None = None
+    best_labels: np.ndarray | None = None
+    best_silhouette = float("-inf")
+
+    for seed in seeds:
+        km = KMeans(
+            n_clusters=n_clusters,
+            random_state=seed,
+            n_init=10,
+        )
+        labels = km.fit_predict(X_scaled)
+        if n_clusters >= 2 and len(df) > n_clusters:
+            sil = float(silhouette_score(X_scaled, labels, random_state=seed))
+        else:
+            sil = float("nan")
+        if best_km is None or (sil == sil and sil > best_silhouette):
+            best_km = km
+            best_labels = labels
+            best_silhouette = sil if sil == sil else best_silhouette
+
+    if best_km is None or best_labels is None:
+        raise SystemExit("KMeans körning misslyckades.")
+
+    labels, centroids_scaled, _ = _relabel_by_size(
+        best_labels, np.asarray(best_km.cluster_centers_, dtype=float)
     )
-    labels = final_km.fit_predict(X_scaled)
     df = df.copy()
     df["cluster_id"] = labels
 
@@ -284,6 +330,13 @@ def main() -> None:
     summary_md = _to_markdown_table(summary.round(6))
     args.summary_output.write_text(summary_md, encoding="utf-8")
     print(summary_md, end="")
+
+    centroids_unscaled = scaler.inverse_transform(centroids_scaled)
+    centroids_df = pd.DataFrame(centroids_unscaled, columns=FEATURES)
+    centroids_df.insert(0, "cluster_id", range(len(centroids_df)))
+    args.centroids_output.parent.mkdir(parents=True, exist_ok=True)
+    centroids_df.to_csv(args.centroids_output, index=False)
+    print(f"Sparade centroids: {args.centroids_output.resolve()}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(args.output, index=False)

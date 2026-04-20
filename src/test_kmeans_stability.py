@@ -9,6 +9,7 @@ Standard: k-sensitivitet (k=3,4,5), fyra seeds; sammanfattningstabell; detaljer 
 from __future__ import annotations
 
 import argparse
+import random
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ from project_paths import (
 )
 from train_kmeans import FEATURES, load_and_clean, plot_2d_analysis
 
-SEEDS = (10, 20, 30, 40)
+SEEDS: tuple[int, ...] = ()
 SIZE_STD_FRAC = 0.05
 DRIFT_MSE_THRESHOLD = 0.05
 DEFAULT_K_LIST = (3, 4, 5)
@@ -77,6 +78,17 @@ def _pc_axis_label(pc_name: str, features: list[str], loadings: np.ndarray) -> s
     desc = " & ".join(_pretty_feature_name(f) for f in top)
 
     return f"{pc_name} ({desc})"
+
+
+def _relabel_labels_by_size(labels: np.ndarray) -> np.ndarray:
+    counts = pd.Series(labels).value_counts()
+    ordered = (
+        counts.sort_values(ascending=False, kind="stable")
+        .index.to_numpy(dtype=int)
+        .tolist()
+    )
+    mapping = {int(old): int(new) for new, old in enumerate(ordered)}
+    return np.array([mapping[int(x)] for x in labels], dtype=int)
 
 
 @dataclass
@@ -246,7 +258,7 @@ def _save_figures_for_k(
 ) -> None:
     """Spara PCA/2D-figur + boxplot för ett specifikt k (inga terminalutskrifter)."""
     k = res.k
-    labels_final = res.aligned_labels_list[-1]
+    labels_final = _relabel_labels_by_size(res.aligned_labels_list[-1])
 
     _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
     _save_invalid_ratio_by_cluster(
@@ -267,11 +279,12 @@ def _save_figures_for_k(
                     random_state=random_state_extra,
                 )
             )
+            labels_plot = _relabel_labels_by_size(res.aligned_labels_list[run_idx])
             plot_2d_analysis(
                 df,
                 x_feat,
                 y_feat,
-                res.aligned_labels_list[run_idx],
+                labels_plot,
                 out_path=None,
                 title=f"Run {run_idx + 1} (seed={seed})  Silhouette={sil:.3f}",
                 ax=ax,
@@ -312,7 +325,7 @@ def _save_figures_for_k(
             res.aligned_labels_list[run_idx],
             random_state=random_state_extra,
         )
-        lbls = np.asarray(res.aligned_labels_list[run_idx], dtype=int)
+        lbls = _relabel_labels_by_size(res.aligned_labels_list[run_idx])
         point_colors = [colors[int(c)] for c in lbls]
         ax.scatter(
             X_pca[:, 0],
@@ -454,7 +467,7 @@ def _print_best_k_full(
     boxplot_path: Path,
 ) -> None:
     k = res.k
-    labels_final = res.aligned_labels_list[-1]
+    labels_final = _relabel_labels_by_size(res.aligned_labels_list[-1])
 
     _save_feature_boxplots(df, labels_final, FEATURES, boxplot_path, k)
     _save_invalid_ratio_by_cluster(
@@ -475,11 +488,12 @@ def _print_best_k_full(
                     random_state=random_state_extra,
                 )
             )
+            labels_plot = _relabel_labels_by_size(res.aligned_labels_list[run_idx])
             plot_2d_analysis(
                 df,
                 x_feat,
                 y_feat,
-                res.aligned_labels_list[run_idx],
+                labels_plot,
                 out_path=None,
                 title=f"Run {run_idx + 1} (seed={seed})  Silhouette={sil:.3f}",
                 ax=ax,
@@ -519,7 +533,7 @@ def _print_best_k_full(
                 res.aligned_labels_list[run_idx],
                 random_state=random_state_extra,
             )
-            lbls = np.asarray(res.aligned_labels_list[run_idx], dtype=int)
+            lbls = _relabel_labels_by_size(res.aligned_labels_list[run_idx])
             point_colors = [colors[int(c)] for c in lbls]
             ax.scatter(
                 X_pca[:, 0],
@@ -628,6 +642,8 @@ def main() -> None:
     X_scaled = scaler.fit_transform(X)
     N = len(df)
 
+    global SEEDS
+    SEEDS = tuple(random.sample(range(1000), 4))
     print(f"\n{'=' * 60}")
     print(f"k-sensitivitet: seeds {SEEDS}, k ∈ {k_list}")
     print(f"{'=' * 60}")
