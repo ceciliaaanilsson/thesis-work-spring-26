@@ -17,6 +17,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
@@ -25,6 +26,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 from project_paths import (
+    DEFAULT_CLUSTER_SIZES_BY_SEED,
     DEFAULT_FEATURE_DISTRIBUTIONS,
     DEFAULT_STABILITY_PCA,
     DEFAULT_STUDENT_FEATURES,
@@ -99,6 +101,7 @@ class StabilityRunResult:
     mse_drift: float
     max_size_std: float
     std_per_cluster: np.ndarray
+    size_matrix: np.ndarray
     aligned_centroids_list: list[np.ndarray]
     aligned_labels_list: list[np.ndarray]
 
@@ -306,7 +309,7 @@ def _save_figures_for_k(
     cmap = plt.get_cmap("tab10")
     colors = [cmap(i % 10) for i in range(k)]
     handles = [
-        plt.Line2D(
+        Line2D(
             [0],
             [0],
             marker="o",
@@ -442,6 +445,7 @@ def run_stability_for_k(
         mse_drift=mse_drift,
         max_size_std=max_size_std,
         std_per_cluster=std_per_cluster,
+        size_matrix=size_matrix,
         aligned_centroids_list=aligned_centroids_list,
         aligned_labels_list=aligned_labels_list,
     )
@@ -454,6 +458,27 @@ def _pick_best_k(results: list[StabilityRunResult]) -> StabilityRunResult:
         key=lambda r: (-r.mean_silhouette, r.mse_drift, r.max_size_std),
     )
     return results_sorted[0]
+
+
+def _to_markdown_table(df: pd.DataFrame) -> str:
+    cols = [str(c) for c in df.columns]
+
+    def _fmt(v: object) -> str:
+        if isinstance(v, (int, np.integer)):
+            return str(int(v))
+        if isinstance(v, (float, np.floating)):
+            if float(v).is_integer():
+                return str(int(v))
+            return f"{float(v):.6f}".rstrip("0").rstrip(".")
+        return str(v)
+
+    header = "| " + " | ".join(cols) + " |"
+    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+    rows = [
+        "| " + " | ".join(_fmt(v) for v in row) + " |"
+        for row in df.to_numpy()
+    ]
+    return "\n".join([header, sep, *rows]) + "\n"
 
 
 def _print_best_k_full(
@@ -514,7 +539,7 @@ def _print_best_k_full(
         cmap = plt.get_cmap("tab10")
         colors = [cmap(i % 10) for i in range(k)]
         handles = [
-            plt.Line2D(
+            Line2D(
                 [0],
                 [0],
                 marker="o",
@@ -622,6 +647,12 @@ def main() -> None:
         help="Kommaseparerade k-värden (sensitivitetsanalys)",
     )
     p.add_argument(
+        "--output-size-table",
+        type=Path,
+        default=DEFAULT_CLUSTER_SIZES_BY_SEED,
+        help="Basnamn för tabell med klusterstorlek per seed och k (sparas som .md)",
+    )
+    p.add_argument(
         "--verbose-all-k",
         action="store_true",
         help="Skriv full per-run-tabell för varje k (annars endast kompakt + bästa k)",
@@ -662,6 +693,35 @@ def main() -> None:
         print(f"  Medel silhouette (4 körningar): {res.mean_silhouette:.6f}")
         print(f"  Centroid drift MSE (Run1 vs Run4 alignerad): {res.mse_drift:.8f}")
         print(f"  Max std (klusterstorlek över körningar): {res.max_size_std:.4f}")
+
+    size_rows: list[dict[str, int]] = []
+    for res in results:
+        for run_idx, seed in enumerate(SEEDS):
+            row: dict[str, int] = {
+                "k": int(res.k),
+                "run": int(run_idx + 1),
+                "seed": int(seed),
+            }
+            for cid in range(res.k):
+                row[f"cluster_{cid}"] = int(res.size_matrix[run_idx, cid])
+            row["n_students"] = int(np.sum(res.size_matrix[run_idx]))
+            size_rows.append(row)
+
+    size_table = pd.DataFrame(size_rows).sort_values(["k", "run"], kind="stable")
+    max_k = max(k_list)
+    for cid in range(max_k):
+        col = f"cluster_{cid}"
+        if col not in size_table.columns:
+            size_table[col] = 0
+        size_table[col] = size_table[col].fillna(0).astype(int)
+    size_table["n_students"] = size_table["n_students"].astype(int)
+
+    size_md_path = args.output_size_table.with_suffix(".md")
+    size_md_path.parent.mkdir(parents=True, exist_ok=True)
+    md = "# Klusterstorlekar per seed\n\n"
+    md += _to_markdown_table(size_table)
+    size_md_path.write_text(md, encoding="utf-8")
+    print(f"Sparade klusterstorlekar per seed (Markdown): {size_md_path.resolve()}")
 
     summary = pd.DataFrame(
         {

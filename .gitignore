@@ -9,5 +9,5 @@ data/
 
 # Output files
 output/**
-
+results/tables/cluster_sizes_by_seed.md
 *.csv

@@ -15,6 +15,7 @@ DEFAULT_STUDENT_FEATURES = DATA_PROCESSED / "student_features.parquet"
 DEFAULT_CLUSTERED_STUDENTS = DATA_PROCESSED / "clustered_students.parquet"
 DEFAULT_CLUSTER_SUMMARY = DATA_PROCESSED / "cluster_summary.md"
 DEFAULT_KMEANS_CENTROIDS = _ROOT / "results" / "tables" / "kmeans_centroids.csv"
+DEFAULT_CLUSTER_SIZES_BY_SEED = _ROOT / "results" / "tables" / "cluster_sizes_by_seed.csv"
 
 DEFAULT_CLUSTER_2D = OUTPUT_PLOTS / "cluster_2d_validation.png"
 DEFAULT_STABILITY_PCA = OUTPUT_PLOTS / "stability_test_pca.png"
