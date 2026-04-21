@@ -22,6 +22,7 @@ from project_paths import (
     DEFAULT_CLUSTER_2D,
     DEFAULT_CLUSTERED_STUDENTS,
     DEFAULT_CLUSTER_SUMMARY,
+    DEFAULT_K_COMPARISON_PLOT,
     DEFAULT_KMEANS_CENTROIDS,
     DEFAULT_STUDENT_FEATURES,
 )
@@ -193,6 +194,122 @@ def _relabel_by_size(
     return relabeled, reordered_centroids, mapping
 
 
+def _fit_for_k(
+    X_scaled: np.ndarray,
+    n_clusters: int,
+) -> tuple[np.ndarray, np.ndarray, float | None]:
+    if n_clusters < 1:
+        raise SystemExit("--k måste vara minst 1")
+    if n_clusters > len(X_scaled):
+        raise SystemExit(
+            f"--k ({n_clusters}) får inte överstiga antal elever ({len(X_scaled)})."
+        )
+
+    seeds = random.sample(range(1000), 4)
+    print(f"Random seeds for k={n_clusters} (4 runs): {seeds}")
+
+    best_km: KMeans | None = None
+    best_labels: np.ndarray | None = None
+    best_silhouette = float("-inf")
+
+    for seed in seeds:
+        km = KMeans(
+            n_clusters=n_clusters,
+            random_state=seed,
+            n_init=10,
+        )
+        labels = km.fit_predict(X_scaled)
+        if n_clusters >= 2 and len(X_scaled) > n_clusters:
+            sil = float(silhouette_score(X_scaled, labels, random_state=seed))
+        else:
+            sil = float("nan")
+        if best_km is None or (sil == sil and sil > best_silhouette):
+            best_km = km
+            best_labels = labels
+            best_silhouette = sil if sil == sil else best_silhouette
+
+    if best_km is None or best_labels is None:
+        raise SystemExit("KMeans körning misslyckades.")
+
+    labels, centroids_scaled, _ = _relabel_by_size(
+        best_labels, np.asarray(best_km.cluster_centers_, dtype=float)
+    )
+
+    sil: float | None = None
+    if n_clusters >= 2 and len(X_scaled) > n_clusters:
+        sil = float(silhouette_score(X_scaled, labels))
+
+    return labels, centroids_scaled, sil
+
+
+def _build_summary(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    k: int,
+    random_state: int,
+    silhouette: float | None,
+) -> pd.DataFrame:
+    out = df.copy()
+    out["cluster_id"] = labels
+
+    val_table = None
+    if "reserved_absence_minutes_total" in out.columns:
+        val_table = (
+            out.groupby("cluster_id", sort=True)["reserved_absence_minutes_total"]
+            .agg(mean_minutes="mean", median_minutes="median", n="count")
+            .reset_index()
+        )
+
+    summary = (
+        out.groupby("cluster_id", sort=True)[FEATURES]
+        .mean()
+        .join(out.groupby("cluster_id").size().rename("n_students"), how="left")
+        .reset_index()
+    )
+    if val_table is not None:
+        summary = summary.merge(
+            val_table[["cluster_id", "mean_minutes", "median_minutes"]],
+            on="cluster_id",
+            how="left",
+        )
+    summary["k"] = k
+    summary["random_state"] = random_state
+    summary["silhouette"] = silhouette if silhouette is not None else np.nan
+
+    return summary
+
+
+def _save_k_plot(k_metrics: pd.DataFrame, out_path: Path) -> None:
+    if k_metrics.empty:
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(
+        k_metrics["k"].to_numpy(dtype=int),
+        k_metrics["silhouette"].to_numpy(dtype=float),
+        marker="o",
+        color="#1f77b4",
+        lw=2,
+    )
+    ax.set_xlabel("k")
+    ax.set_ylabel("Silhouette")
+    ax.set_title("KMeans: silhouette per k")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _summary_by_k_markdown(summary: pd.DataFrame) -> str:
+    parts: list[str] = ["# Cluster summary\n"]
+    for k in sorted(summary["k"].dropna().unique().tolist()):
+        block = summary.loc[summary["k"] == k].copy()
+        block = block.sort_values("cluster_id", kind="stable")
+        parts.append(f"## k = {int(k)}\n")
+        parts.append(_to_markdown_table(block.round(6)))
+    return "\n".join(parts).strip() + "\n"
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="KMeans-klustring på student_features.parquet"
@@ -228,6 +345,12 @@ def main() -> None:
         help="Antal kluster i slutlig KMeans",
     )
     p.add_argument(
+        "--k-list",
+        type=str,
+        default="",
+        help="Kommaseparerade k-värden som ska inkluderas i summary/plot (t.ex. 3,4,5)",
+    )
+    p.add_argument(
         "--random-state",
         type=int,
         default=42,
@@ -245,6 +368,12 @@ def main() -> None:
         default=DEFAULT_KMEANS_CENTROIDS,
         help="CSV med klustercentroider i originalskala",
     )
+    p.add_argument(
+        "--k-plot-output",
+        type=Path,
+        default=DEFAULT_K_COMPARISON_PLOT,
+        help="Linjediagram över silhouette per k",
+    )
     args = p.parse_args()
 
     df, dropped_zero = load_and_clean(args.input, args.min_lessons)
@@ -261,75 +390,46 @@ def main() -> None:
     X_scaled = scaler.fit_transform(X)
 
     n_clusters = args.k
-    if n_clusters < 1:
-        raise SystemExit("--k måste vara minst 1")
-    if n_clusters > len(df):
-        raise SystemExit(f"--k ({n_clusters}) får inte överstiga antal elever ({len(df)}).")
+    labels, centroids_scaled, sil = _fit_for_k(X_scaled, n_clusters)
 
-    seeds = random.sample(range(1000), 4)
-    print(f"Random seeds (4 runs): {seeds}")
+    df_out = df.copy()
+    df_out["cluster_id"] = labels
+    summary_main = _build_summary(df, labels, n_clusters, args.random_state, sil)
 
-    best_km: KMeans | None = None
-    best_labels: np.ndarray | None = None
-    best_silhouette = float("-inf")
+    k_values = [n_clusters]
+    if args.k_list.strip():
+        try:
+            parsed = [int(x.strip()) for x in args.k_list.split(",") if x.strip()]
+        except ValueError as exc:
+            raise SystemExit(f"Ogiltig --k-list: {args.k_list}") from exc
+        for k in parsed:
+            if k not in k_values:
+                k_values.append(k)
 
-    for seed in seeds:
-        km = KMeans(
-            n_clusters=n_clusters,
-            random_state=seed,
-            n_init=10,
-        )
-        labels = km.fit_predict(X_scaled)
-        if n_clusters >= 2 and len(df) > n_clusters:
-            sil = float(silhouette_score(X_scaled, labels, random_state=seed))
-        else:
-            sil = float("nan")
-        if best_km is None or (sil == sil and sil > best_silhouette):
-            best_km = km
-            best_labels = labels
-            best_silhouette = sil if sil == sil else best_silhouette
-
-    if best_km is None or best_labels is None:
-        raise SystemExit("KMeans körning misslyckades.")
-
-    labels, centroids_scaled, _ = _relabel_by_size(
-        best_labels, np.asarray(best_km.cluster_centers_, dtype=float)
-    )
-    df = df.copy()
-    df["cluster_id"] = labels
-
-    sil: float | None = None
-    if n_clusters >= 2 and len(df) > n_clusters:
-        sil = float(silhouette_score(X_scaled, labels, random_state=args.random_state))
-
-    val_table = None
-    if "reserved_absence_minutes_total" in df.columns:
-        val_table = (
-            df.groupby("cluster_id", sort=True)["reserved_absence_minutes_total"]
-            .agg(mean_minutes="mean", median_minutes="median", n="count")
-            .reset_index()
+    all_summaries: list[pd.DataFrame] = [summary_main]
+    k_metric_rows: list[dict[str, float | int]] = [
+        {"k": n_clusters, "silhouette": float(sil) if sil is not None else float("nan")}
+    ]
+    for k in k_values:
+        if k == n_clusters:
+            continue
+        labels_k, _centroids_k, sil_k = _fit_for_k(X_scaled, k)
+        all_summaries.append(_build_summary(df, labels_k, k, args.random_state, sil_k))
+        k_metric_rows.append(
+            {"k": k, "silhouette": float(sil_k) if sil_k is not None else float("nan")}
         )
 
-    summary = (
-        df.groupby("cluster_id", sort=True)[FEATURES]
-        .mean()
-        .join(df.groupby("cluster_id").size().rename("n_students"), how="left")
-        .reset_index()
-    )
-    if val_table is not None:
-        summary = summary.merge(
-            val_table[["cluster_id", "mean_minutes", "median_minutes"]],
-            on="cluster_id",
-            how="left",
-        )
-    summary["k"] = n_clusters
-    summary["random_state"] = args.random_state
-    summary["silhouette"] = sil if sil is not None else np.nan
+    summary = pd.concat(all_summaries, ignore_index=True)
+    summary = summary.sort_values(["k", "cluster_id"], ascending=[True, True], kind="stable")
 
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
-    summary_md = _to_markdown_table(summary.round(6))
+    summary_md = _summary_by_k_markdown(summary)
     args.summary_output.write_text(summary_md, encoding="utf-8")
     print(summary_md, end="")
+
+    k_metrics = pd.DataFrame(k_metric_rows).sort_values("k", kind="stable")
+    _save_k_plot(k_metrics, args.k_plot_output)
+    print(f"Sparade k-plot: {args.k_plot_output.resolve()}")
 
     centroids_unscaled = scaler.inverse_transform(centroids_scaled)
     centroids_df = pd.DataFrame(centroids_unscaled, columns=FEATURES)
@@ -339,7 +439,7 @@ def main() -> None:
     print(f"Sparade centroids: {args.centroids_output.resolve()}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(args.output, index=False)
+    df_out.to_parquet(args.output, index=False)
     print(f"\nSparade: {args.output.resolve()}  (rader: {len(df)})")
 
 

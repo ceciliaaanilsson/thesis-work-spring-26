@@ -23,7 +23,7 @@ python3 src/preprocess.py "${PRE_ARGS[@]}"
 
 # Här kör vi den slutgiltiga modellen med k=3 (eller vad K råkar vara)
 echo "==> 2/3 Train KMeans (k=${K_FINAL}) -> data/processed/clustered_students.parquet"
-python3 src/train_kmeans.py --k "$K_FINAL" --min-lessons "$MIN_LESSONS"
+python3 src/train_kmeans.py --k "$K_FINAL" --k-list "$K_TEST_LIST" --min-lessons "$MIN_LESSONS"
 
 # Här kör vi stabilitetstestet för ALLA k-värden så vi får våra jämförelsebilder
 echo "==> 3/3 Stability Test (--k-list ${K_TEST_LIST}) -> output/plots/"

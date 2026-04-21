@@ -19,6 +19,7 @@ DEFAULT_KMEANS_CENTROIDS = _ROOT / "results" / "tables" / "kmeans_centroids.csv"
 DEFAULT_CLUSTER_2D = OUTPUT_PLOTS / "cluster_2d_validation.png"
 DEFAULT_STABILITY_PCA = OUTPUT_PLOTS / "stability_test_pca.png"
 DEFAULT_FEATURE_DISTRIBUTIONS = OUTPUT_PLOTS / "feature_distributions.png"
+DEFAULT_K_COMPARISON_PLOT = OUTPUT_PLOTS / "k_comparison_silhouette.png"
 
 
 def project_root() -> Path:
