@@ -10,4 +10,5 @@ data/
 # Output files
 output/**
 results/tables/cluster_sizes_by_seed.md
+results/tables/cluster_absence_geq_15pct.md
 *.csv
