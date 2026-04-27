@@ -192,6 +192,13 @@ def build_student_features(
     if "absence_minutes_total" not in df.columns:
         raise ValueError("Saknad kolumn: absence_minutes_total")
 
+    # Först av allt: ta bort lektionsrader som innehåller något saknat värde
+    # i andra kolumner än cause_ext. Tom cause_ext får vara kvar.
+    n_before_drop_missing = len(df)
+    missing_cols = [c for c in df.columns if c != "cause_ext"]
+    df = df.dropna(subset=missing_cols, how="any").copy()
+    rows_dropped_missing_values = int(n_before_drop_missing - len(df))
+
     # Säkerhetskontroller på rådata (innan terminsfilter och övrig aggregering).
     n_before_dedup = len(df)
     df = df.drop_duplicates()
@@ -217,6 +224,7 @@ def build_student_features(
 
     if df.empty:
         stats: dict[str, Any] = {
+            "rows_dropped_missing_values": rows_dropped_missing_values,
             "rows_removed_duplicates": rows_removed_duplicates,
             "rows_capped_absence_to_schema": rows_capped_absence_to_schema,
             "rows_dropped_unreported": 0,
@@ -422,6 +430,7 @@ def build_student_features(
     out.loc[:, CLUSTERING_FEATURES] = out.loc[:, CLUSTERING_FEATURES].fillna(0.0)
 
     stats = {
+        "rows_dropped_missing_values": rows_dropped_missing_values,
         "rows_removed_duplicates": rows_removed_duplicates,
         "rows_capped_absence_to_schema": rows_capped_absence_to_schema,
         "rows_dropped_unreported": rows_dropped_unreported,
@@ -490,6 +499,9 @@ def main() -> None:
     print(f"     Utdatafil: {args.output.resolve()}")
     print()
     print("  --- Datakvalitet (logg) ---")
+    print(
+        f"     Rader borttagna (saknat värde i rad): {stats['rows_dropped_missing_values']}"
+    )
     print(
         f"     Rader borttagna (exakta dubletter): {stats['rows_removed_duplicates']}"
     )
