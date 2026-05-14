@@ -72,6 +72,15 @@ python scripts/cluster_feature_means.py
 
 Standard: läser `data/processed/clustered_students.parquet` och skriver till `output/tables/cluster_feature_means.md`. Egna sökvägar: `python scripts/cluster_feature_means.py --help`.
 
+För att skapa figuren med zonfördelning per block och kluster kan du köra:
+
+```bash
+source .venv/bin/activate
+python3 scripts/plot_bimonthly_zone_distribution.py
+```
+
+Skriptet läser `results/tables/bimonthly_analysis.csv` och sparar figuren som `output/plots/bimonthly_zone_distribution.png`.
+
 Bi-månatlig riskanalys (sparar CSV + Markdown):
 
 ```bash
