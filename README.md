@@ -14,28 +14,59 @@ pip install -r requirements.txt
 
 Run all commands from the project root.
 
-## Run the full pipeline
+## Run order
+
+### 1. Main pipeline
+
+Produces `student_features.parquet`, `clustered_students.parquet`, and stability plots.
 
 ```bash
 chmod +x scripts/run_project.sh   # first time only
 ./scripts/run_project.sh
 ```
 
-## Scripts
+Or run the steps manually:
 
-### Pipeline (`src/`)
+```bash
+python3 src/preprocess.py
+python3 src/train_kmeans.py
+python3 src/test_kmeans_stability.py
+```
 
-| Script | Description |
-|--------|-------------|
-| `python3 src/preprocess.py` | Raw lesson data → `data/processed/student_features.parquet` |
-| `python3 src/train_kmeans.py --k 3 --min-lessons 180` | KMeans clustering → `data/processed/clustered_students.parquet` |
-| `python3 src/test_kmeans_stability.py --min-lessons 180 --k-list 3,4,5` | Stability across seeds and k values → `output/plots/` |
+Use `--help` on any script to override defaults (e.g. `--k`, `--min-lessons`).
 
-### Analysis and tables (`scripts/`)
+### 2. After `clustered_students.parquet` exists
 
-| Script | Description | Requires |
-|--------|-------------|----------|
-| `python3 scripts/cluster_feature_means.py` | Mean values per cluster (Markdown) → `output/tables/cluster_feature_means.md` | `clustered_students.parquet` |
-| `python3 scripts/cluster_absence_threshold_table.py` | Share of students per cluster with ≥15% absence → `results/tables/cluster_absence_geq_15pct.md` | `clustered_students.parquet` |
-| `python3 scripts/analyze_bimonthly_risk.py` | Bi-monthly risk per cluster → `results/tables/bimonthly_analysis.csv`, `results/logs/bimonthly_summary.md` | `clustered_students.parquet` |
-| `python3 scripts/plot_bimonthly_zone_distribution.py` | Stacked bar chart per cluster → `output/plots/bimonthly_zone_distribution_cluster*.png` | `bimonthly_analysis.csv` |
+Cluster summary table (all KMeans features, `invalid_ratio`, `reserved_absence_minutes_total`):
+
+```bash
+python3 scripts/cluster_feature_means.py
+```
+
+→ `output/tables/cluster_feature_means.md`
+
+Absence threshold table (share of students per cluster with ≥15% absence):
+
+```bash
+python3 scripts/cluster_absence_threshold_table.py
+```
+
+→ `results/tables/cluster_absence_geq_15pct.md`
+
+Bi-monthly risk analysis:
+
+```bash
+python3 scripts/analyze_bimonthly_risk.py
+```
+
+→ `results/tables/bimonthly_analysis.csv`, `results/logs/bimonthly_summary.md`
+
+### 3. After `bimonthly_analysis.csv` exists
+
+Zone distribution plots (one PNG per cluster):
+
+```bash
+python3 scripts/plot_bimonthly_zone_distribution.py
+```
+
+→ `output/plots/bimonthly_zone_distribution_cluster0.png`, `_cluster1.png`, `_cluster2.png`
