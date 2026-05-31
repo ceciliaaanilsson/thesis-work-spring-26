@@ -217,6 +217,11 @@ def _stability_pca_path(base: Path, k: int) -> Path:
     return base.with_name(f"stability_pca_k{k}.png")
 
 
+def _stability_pca_single_path(base: Path, k: int) -> Path:
+    """En PCA-panel utan run/seed: stability_pca_k{k}_single.png."""
+    return base.with_name(f"stability_pca_k{k}_single.png")
+
+
 def _boxplot_path(base: Path, k: int) -> Path:
     """Spara som feature_distributions_k{k}.png i samma katalog som base."""
     return base.with_name(f"feature_distributions_k{k}.png")
@@ -245,6 +250,99 @@ def _save_invalid_ratio_by_cluster(
     ax.set_title(f"invalid_ratio per kluster (k={k})")
     ax.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _save_stability_pca_single_panel(
+    res: StabilityRunResult,
+    df: pd.DataFrame,
+    X_scaled: np.ndarray,
+    random_state_extra: int,
+    out_path: Path,
+) -> None:
+    """
+    Samma PCA-stil som stability_pca_k{k}.png men en panel, utan run/seed i rubriker.
+
+    Använder sista alignerade körningen med storleksomlappning (samma som boxplot).
+    """
+    k = res.k
+    labels_final = _relabel_labels_by_size(res.aligned_labels_list[-1])
+    sil = float(
+        silhouette_score(
+            X_scaled,
+            res.aligned_labels_list[-1],
+            random_state=random_state_extra,
+        )
+    )
+
+    if len(FEATURES) == 2:
+        x_feat, y_feat = FEATURES[0], FEATURES[1]
+        fig, ax = plt.subplots(figsize=(8, 6.5))
+        plot_2d_analysis(
+            df,
+            x_feat,
+            y_feat,
+            labels_final,
+            out_path=None,
+            title=f"Silhouette={sil:.3f}",
+            ax=ax,
+        )
+        plt.suptitle(
+            f"Rå 2D (k={k}) — färg = alignerat kluster-id — OLS + Spearman i panel",
+            y=1.02,
+        )
+        plt.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        return
+
+    pca = PCA(n_components=2, random_state=random_state_extra)
+    X_pca = pca.fit_transform(X_scaled)
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i % 10) for i in range(k)]
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=colors[c],
+            markersize=7,
+            label=f"{c}",
+        )
+        for c in range(k)
+    ]
+    pc1_label = _pc_axis_label("PC1", FEATURES, np.asarray(pca.components_[0], dtype=float))
+    pc2_label = _pc_axis_label("PC2", FEATURES, np.asarray(pca.components_[1], dtype=float))
+    point_colors = [colors[int(c)] for c in labels_final]
+
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    ax.scatter(
+        X_pca[:, 0],
+        X_pca[:, 1],
+        c=point_colors,
+        alpha=0.65,
+        s=12,
+    )
+    ax.set_xlabel(pc1_label)
+    ax.set_ylabel(pc2_label)
+    ax.set_title(f"Silhouette={sil:.3f}")
+    ax.grid(True, alpha=0.3)
+    plt.suptitle(
+        f"PCA (k={k}) — osynliga beteendemönster i 2D — färg = alignerat kluster-id",
+        y=1.02,
+    )
+    fig.legend(
+        handles=handles,
+        title="cluster_id",
+        loc="lower center",
+        ncol=min(k, 8),
+        frameon=False,
+    )
+    plt.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -300,6 +398,13 @@ def _save_figures_for_k(
         pca_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(pca_path, dpi=150, bbox_inches="tight")
         plt.close()
+        _save_stability_pca_single_panel(
+            res,
+            df,
+            X_scaled,
+            random_state_extra,
+            _stability_pca_single_path(pca_path, k),
+        )
         return
 
     pca = PCA(n_components=2, random_state=random_state_extra)
@@ -356,6 +461,13 @@ def _save_figures_for_k(
     pca_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(pca_path, dpi=150, bbox_inches="tight")
     plt.close()
+    _save_stability_pca_single_panel(
+        res,
+        df,
+        X_scaled,
+        random_state_extra,
+        _stability_pca_single_path(pca_path, k),
+    )
 
 
 def run_stability_for_k(

@@ -21,11 +21,70 @@ ZONE_COLORS = {
 	"Yellow": "#f9a825",
 	"Red": "#c62828",
 }
+ZONE_LABELS = {
+	"Green": "Grön (< 8 %)",
+	"Yellow": "Gul (8–15 %)",
+	"Red": "Röd (> 15 %)",
+}
+
+
+def _cluster_output_path(base: Path, cluster_id: int) -> Path:
+	"""bimonthly_zone_distribution.png -> bimonthly_zone_distribution_cluster0.png"""
+	return base.with_name(f"{base.stem}_cluster{cluster_id}{base.suffix}")
+
+
+def _pivot_cluster(df: pd.DataFrame, cluster_id: int) -> pd.DataFrame:
+	sub = df[df["cluster_id"].astype(int) == cluster_id].copy()
+	return (
+		sub.pivot_table(
+			index="block",
+			columns="zone",
+			values="pct_of_cluster_active",
+			aggfunc="first",
+			fill_value=0.0,
+		)
+		.reindex(index=BLOCK_ORDER, fill_value=0.0)
+		.reindex(columns=ZONE_ORDER, fill_value=0.0)
+	)
+
+
+def _save_cluster_figure(pivot: pd.DataFrame, cluster_id: int, out_path: Path) -> None:
+	fig, ax = plt.subplots(figsize=(6.5, 5))
+	x = np.arange(len(BLOCK_ORDER))
+	bottom = np.zeros(len(BLOCK_ORDER), dtype=float)
+
+	for zone in ZONE_ORDER:
+		values = pivot[zone].to_numpy(dtype=float)
+		ax.bar(
+			x,
+			values,
+			bottom=bottom,
+			color=ZONE_COLORS[zone],
+			edgecolor="white",
+			linewidth=0.8,
+			label=ZONE_LABELS[zone],
+		)
+		bottom += values
+
+	ax.set_title(f"Cluster {cluster_id}")
+	ax.set_xticks(x)
+	ax.set_xticklabels(BLOCK_ORDER, rotation=25, ha="right")
+	ax.set_ylabel("Andel av klustrets aktiva elever (%)")
+	ax.set_ylim(0, 100)
+	ax.grid(axis="y", alpha=0.25)
+	handles, labels = ax.get_legend_handles_labels()
+	fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
+	fig.suptitle("Bi-monthly riskzoner", y=1.02)
+	plt.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
+
+	out_path.parent.mkdir(parents=True, exist_ok=True)
+	plt.savefig(out_path, dpi=160, bbox_inches="tight")
+	plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:
 	p = argparse.ArgumentParser(
-		description="Plot bimonthly zone distribution per cluster as stacked bars."
+		description="Plot bimonthly zone distribution per cluster as stacked bars (one PNG per cluster)."
 	)
 	p.add_argument(
 		"--input",
@@ -37,7 +96,7 @@ def parse_args() -> argparse.Namespace:
 		"--output",
 		type=Path,
 		default=DEFAULT_OUTPUT,
-		help="PNG file to write",
+		help="Basnamn; sparar ..._cluster0.png, ..._cluster1.png, osv.",
 	)
 	return p.parse_args()
 
@@ -55,61 +114,11 @@ def main() -> None:
 	if not clusters:
 		raise SystemExit("No clusters found in input.")
 
-	fig, axes = plt.subplots(
-		1,
-		len(clusters),
-		figsize=(5.5 * len(clusters), 5),
-		sharey=True,
-	)
-	if len(clusters) == 1:
-		axes = [axes]
-
-	for ax, cid in zip(axes, clusters):
-		sub = df[df["cluster_id"].astype(int) == cid].copy()
-		pivot = (
-			sub.pivot_table(
-				index="block",
-				columns="zone",
-				values="pct_of_cluster_active",
-				aggfunc="first",
-				fill_value=0.0,
-			)
-			.reindex(index=BLOCK_ORDER, fill_value=0.0)
-			.reindex(columns=ZONE_ORDER, fill_value=0.0)
-		)
-
-		x = np.arange(len(BLOCK_ORDER))
-		bottom = np.zeros(len(BLOCK_ORDER), dtype=float)
-
-		for zone in ZONE_ORDER:
-			values = pivot[zone].to_numpy(dtype=float)
-			ax.bar(
-				x,
-				values,
-				bottom=bottom,
-				color=ZONE_COLORS[zone],
-				edgecolor="white",
-				linewidth=0.8,
-				label=zone,
-			)
-			bottom += values
-
-		ax.set_title(f"Cluster {cid}")
-		ax.set_xticks(x)
-		ax.set_xticklabels(BLOCK_ORDER, rotation=25, ha="right")
-		ax.set_ylim(0, 100)
-		ax.grid(axis="y", alpha=0.25)
-
-	axes[0].set_ylabel("Andel av klustrets aktiva elever (%)")
-	handles, labels = axes[-1].get_legend_handles_labels()
-	fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
-	fig.suptitle("Bi-monthly riskzoner per kluster", y=1.02)
-	plt.tight_layout(rect=(0, 0.08, 1, 1))
-
-	args.output.parent.mkdir(parents=True, exist_ok=True)
-	plt.savefig(args.output, dpi=160, bbox_inches="tight")
-	plt.close(fig)
-	print(f"Saved figure: {args.output.resolve()}")
+	for cid in clusters:
+		pivot = _pivot_cluster(df, cid)
+		out_path = _cluster_output_path(args.output, cid)
+		_save_cluster_figure(pivot, cid, out_path)
+		print(f"Saved figure: {out_path.resolve()}")
 
 
 if __name__ == "__main__":
